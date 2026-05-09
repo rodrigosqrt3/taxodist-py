@@ -2,7 +2,7 @@
 
 [![PyPI version](https://badge.fury.io/py/taxodist-py.svg)](https://badge.fury.io/py/taxodist-py)
 [![Python Tests](https://github.com/rodrigosqrt3/taxodist-py/actions/workflows/python-app.yml/badge.svg)](https://github.com/rodrigosqrt3/taxodist-py/actions/workflows/python-app.yml)
-[![Coverage](https://app.codecov.io/gh/rodrigosqrt3/taxodist-py/branch/main/graph/badge.svg)](https://app.codecov.io/gh/rodrigosqrt3/taxodist-py)
+[![Coverage](https://codecov.io/gh/rodrigosqrt3/taxodist-py/branch/main/graph/badge.svg)](https://codecov.io/gh/rodrigosqrt3/taxodist-py)
 
 **Taxonomic distance and phylogenetic lineage computation for any taxon on Earth.**
 
