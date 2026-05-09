@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taxodist"
+version = "0.3.0"
+authors =[
+  { name="Rodrigo Fonseca Villa", email="rodrigo03.villa@gmail.com" }
+]
+description = "Taxonomic Distance and Phylogenetic Lineage Computation"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "GPL-3.0-or-later"}
+classifiers =[
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies =[
+    "requests>=2.25.0",
+    "beautifulsoup4>=4.9.0",
+    "pandas>=1.2.0",
+    "numpy>=1.20.0",
+    "scipy>=1.6.0",
+    "matplotlib>=3.3.0",
+    "seaborn>=0.11.0"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/rodrigosqrt3/taxodist"
+"Bug Tracker" = "https://github.com/rodrigosqrt3/taxodist/issues"
