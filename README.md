@@ -14,7 +14,7 @@
 pip install taxodist
 ```
 ```bash
-pip install git+https://github.com/rodrigosqrt3/taxodist.git
+pip install git+https://github.com/rodrigosqrt3/taxodist-py.git
 ```
 
 ## Basic usage
