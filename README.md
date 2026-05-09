@@ -1,6 +1,6 @@
 # taxodist
 
-[![PyPI version](https://badge.fury.io/py/taxodist.svg)](https://badge.fury.io/py/taxodist)
+[![PyPI version](https://img.shields.io/pypi/v/taxodist.svg?color=blue)](https://pypi.org/project/taxodist/)
 [![Python Tests](https://github.com/rodrigosqrt3/taxodist-py/actions/workflows/python-app.yml/badge.svg)](https://github.com/rodrigosqrt3/taxodist-py/actions/workflows/python-app.yml)
 [![Coverage](https://codecov.io/gh/rodrigosqrt3/taxodist-py/branch/main/graph/badge.svg)](https://codecov.io/gh/rodrigosqrt3/taxodist-py)
 
