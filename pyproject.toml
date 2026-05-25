@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taxodist"
-version = "0.3.0"
+version = "0.4.0"
 authors =[
   { name="Rodrigo Fonseca Villa", email="rodrigo03.villa@gmail.com" }
 ]
