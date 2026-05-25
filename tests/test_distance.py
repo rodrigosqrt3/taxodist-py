@@ -839,6 +839,162 @@ def test_taxo_search_parses_html_applies_skips_dedups_and_returns_df(mock_get):
     assert df["name"].iloc[0] == "Bacteria (Kingdom)"
     assert df["name"].iloc[1] == "Bacteria (Domain)"
 
+# ── cache_info ────────────────────────────────────────────────────────────────
+
+def test_cache_info_returns_dict_with_correct_structure():
+    clear_cache()
+    result = fetch.cache_info()
+    assert isinstance(result, dict)
+    assert set(result.keys()) == {"n_lineages", "n_ids", "taxa", "size_bytes"}
+
+def test_cache_info_reports_zero_counts_on_empty_cache():
+    clear_cache()
+    result = fetch.cache_info()
+    assert result["n_lineages"] == 0
+    assert result["n_ids"] == 0
+    assert result["taxa"] == []
+
+def test_cache_info_counts_lineages_and_ids_correctly():
+    clear_cache()
+    fetch._taxodist_cache["id_Tyrannosaurus"] = "50841"
+    fetch._taxodist_cache["id_Velociraptor"]  = "12345"
+    fetch._taxodist_cache["lin_50841"] = ["Biota", "Animalia", "Dinosauria", "Tyrannosaurus"]
+    result = fetch.cache_info()
+    assert result["n_lineages"] == 1
+    assert result["n_ids"] == 2
+
+def test_cache_info_taxa_names_strip_lin_prefix():
+    clear_cache()
+    fetch._taxodist_cache["lin_50841"] = ["Biota", "Animalia", "Tyrannosaurus"]
+    fetch._taxodist_cache["lin_12345"] = ["Biota", "Animalia", "Velociraptor"]
+    result = fetch.cache_info()
+    assert set(result["taxa"]) == {"50841", "12345"}
+
+def test_cache_info_size_bytes_is_positive_when_populated():
+    clear_cache()
+    fetch._taxodist_cache["lin_50841"] = ["Biota", "Animalia", "Tyrannosaurus"]
+    result = fetch.cache_info()
+    assert isinstance(result["size_bytes"], int)
+    assert result["size_bytes"] > 0
+
+def test_cache_info_prints_without_error(capsys):
+    clear_cache()
+    fetch._taxodist_cache["lin_50841"] = ["Biota", "Animalia", "Tyrannosaurus"]
+    fetch.cache_info()
+    captured = capsys.readouterr()
+    assert "taxodist Cache" in captured.out
+    assert "Lineages cached" in captured.out
+    assert "50841" in captured.out
+
+def test_cache_info_prints_no_lineages_message_when_empty(capsys):
+    clear_cache()
+    fetch.cache_info()
+    captured = capsys.readouterr()
+    assert "No lineages cached yet." in captured.out
+
+# ── focal_distances ───────────────────────────────────────────────────────────
+
+@patch("taxodist.distance.get_lineage")
+def test_focal_distances_returns_none_when_focal_not_found(mock_get_lineage):
+    mock_get_lineage.return_value = None
+    from taxodist.distance import focal_distances
+    result = focal_distances("Fakeosaurus", ["Velociraptor", "Triceratops"])
+    assert result is None
+
+@patch("taxodist.distance.get_lineage")
+def test_focal_distances_returns_dataframe(mock_get_lineage):
+    from taxodist.distance import focal_distances
+    lins = {
+        "Tyrannosaurus": ["Biota", "Animalia", "Dinosauria", "Theropoda", "Tyrannosaurus"],
+        "Velociraptor":  ["Biota", "Animalia", "Dinosauria", "Theropoda", "Velociraptor"],
+        "Triceratops":   ["Biota", "Animalia", "Dinosauria", "Ornithischia", "Triceratops"]
+    }
+    mock_get_lineage.side_effect = lambda t, **kwargs: lins.get(t)
+    result = focal_distances("Tyrannosaurus", ["Velociraptor", "Triceratops"], progress=False)
+    assert isinstance(result, pd.DataFrame)
+
+def test_focal_distances_has_correct_columns():
+    from taxodist.distance import focal_distances
+    with patch("taxodist.distance.get_lineage") as mock:
+        lins = {
+            "Tyrannosaurus": ["Biota", "Animalia", "Dinosauria", "Theropoda", "Tyrannosaurus"],
+            "Velociraptor":  ["Biota", "Animalia", "Dinosauria", "Theropoda", "Velociraptor"]
+        }
+        mock.side_effect = lambda t, **kwargs: lins.get(t)
+        result = focal_distances("Tyrannosaurus", ["Velociraptor"], progress=False)
+        assert list(result.columns) == ["taxon", "distance", "mrca", "mrca_depth"]
+
+@patch("taxodist.distance.get_lineage")
+def test_focal_distances_is_sorted_by_distance_ascending(mock_get_lineage):
+    from taxodist.distance import focal_distances
+    lins = {
+        "Tyrannosaurus": ["Biota", "Animalia", "Dinosauria", "Theropoda", "Tyrannosaurus"],
+        "Velociraptor":  ["Biota", "Animalia", "Dinosauria", "Theropoda", "Velociraptor"],
+        "Triceratops":   ["Biota", "Animalia", "Dinosauria", "Ornithischia", "Triceratops"]
+    }
+    mock_get_lineage.side_effect = lambda t, **kwargs: lins.get(t)
+    result = focal_distances("Tyrannosaurus", ["Triceratops", "Velociraptor"], progress=False)
+    assert result["taxon"].iloc[0] == "Velociraptor"
+
+@patch("taxodist.distance.get_lineage")
+def test_focal_distances_handles_focal_in_community_with_distance_0(mock_get_lineage):
+    from taxodist.distance import focal_distances
+    mock_get_lineage.return_value = ["Biota", "Animalia", "Dinosauria", "Theropoda", "Tyrannosaurus"]
+    result = focal_distances("Tyrannosaurus", ["Tyrannosaurus"], progress=False)
+    assert result["distance"].iloc[0] == 0.0
+    assert result["mrca"].iloc[0] == "Tyrannosaurus"
+
+@patch("taxodist.distance.get_lineage")
+def test_focal_distances_handles_none_candidate_lineage(mock_get_lineage):
+    from taxodist.distance import focal_distances
+    def side_effect(taxon, **kwargs):
+        if taxon == "Tyrannosaurus":
+            return ["Biota", "Animalia", "Dinosauria", "Theropoda", "Tyrannosaurus"]
+        return None
+    mock_get_lineage.side_effect = side_effect
+    result = focal_distances("Tyrannosaurus", ["Fakeosaurus"], progress=False)
+    assert pd.isna(result.loc[result["taxon"] == "Fakeosaurus", "distance"].values[0])
+    assert result.loc[result["taxon"] == "Fakeosaurus", "mrca"].values[0] is None
+
+@patch("taxodist.distance.get_lineage")
+def test_focal_distances_preserves_focal_attribute(mock_get_lineage):
+    from taxodist.distance import focal_distances
+    mock_get_lineage.return_value = ["Biota", "Animalia", "Dinosauria", "Theropoda", "Tyrannosaurus"]
+    result = focal_distances("Tyrannosaurus", ["Tyrannosaurus"], progress=False)
+    assert result.attrs["focal"] == "Tyrannosaurus"
+
+@patch("taxodist.distance.get_lineage")
+def test_focal_distances_with_progress_true_runs_without_error(mock_get_lineage, capsys):
+    from taxodist.distance import focal_distances
+    lins = {
+        "Tyrannosaurus": ["Biota", "Animalia", "Dinosauria", "Theropoda", "Tyrannosaurus"],
+        "Velociraptor":  ["Biota", "Animalia", "Dinosauria", "Theropoda", "Velociraptor"]
+    }
+    mock_get_lineage.side_effect = lambda t, **kwargs: lins.get(t)
+    focal_distances("Tyrannosaurus", ["Velociraptor"], progress=True)
+    captured = capsys.readouterr()
+    assert "Computing focal distances" in captured.out
+    assert "Done." in captured.out
+
+def test_print_focal_distances_runs_without_error(capsys):
+    from taxodist.distance import focal_distances
+    from taxodist.utils import print_focal_distances
+    with patch("taxodist.distance.get_lineage") as mock:
+        lins = {
+            "Tyrannosaurus": ["Biota", "Animalia", "Dinosauria", "Theropoda", "Tyrannosaurus"],
+            "Velociraptor":  ["Biota", "Animalia", "Dinosauria", "Theropoda", "Velociraptor"]
+        }
+        mock.side_effect = lambda t, **kwargs: lins.get(t)
+        result = focal_distances("Tyrannosaurus", ["Velociraptor"], progress=False)
+    printed = print_focal_distances(result)
+    assert printed is result
+    captured = capsys.readouterr()
+    assert "Tyrannosaurus" in captured.out
+
+def test_print_focal_distances_handles_none():
+    from taxodist.utils import print_focal_distances
+    assert print_focal_distances(None) is None
+    
 # ── Network tests (skipped if offline) ────────────────────────────────────────
 
 def is_taxonomicon_down():
