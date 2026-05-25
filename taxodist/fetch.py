@@ -79,6 +79,49 @@ def load_cache(file):
     print(f"Cache loaded from '{file}' ({len(data)} entries).")
     return None
 
+def cache_info():
+    """
+    Inspect the current taxodist lineage cache
+
+    Reports the number of cached entries, their total memory footprint, and
+    the names of all taxa whose lineages are stored in the current session.
+    Useful for understanding what has already been retrieved before running
+    further computations.
+
+    Returns
+    -------
+    dict
+        A dictionary with:
+        - n_lineages: int. Number of cached lineages.
+        - n_ids: int. Number of cached taxon IDs.
+        - taxa: list. Names of taxa with cached lineages (id stripped).
+        - size_bytes: int. Total memory used by the cache.
+    """
+    import sys
+
+    lin_keys = [k for k in _taxodist_cache if k.startswith("lin_")]
+    id_keys  = [k for k in _taxodist_cache if k.startswith("id_")]
+    taxa_names = [k[len("lin_"):] for k in lin_keys]
+    size_bytes = sys.getsizeof(_taxodist_cache)
+
+    print("taxodist Cache")
+    print(f"* Lineages cached : {len(lin_keys)}")
+    print(f"* IDs cached      : {len(id_keys)}")
+    print(f"* Memory used     : {size_bytes} bytes")
+
+    if taxa_names:
+        print("\nCached taxa:")
+        for name in taxa_names:
+            print(f"  {name}")
+    else:
+        print("\nNo lineages cached yet.")
+
+    return {
+        "n_lineages": len(lin_keys),
+        "n_ids":      len(id_keys),
+        "taxa":       taxa_names,
+        "size_bytes": size_bytes
+    }
 
 def get_taxonomicon_id(taxon, verbose=False):
     """

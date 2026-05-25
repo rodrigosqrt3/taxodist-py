@@ -358,3 +358,13 @@ def print_taxodist_path(x):
             print(f"  {node}  (depth {dep})  \u2193")
             
     return x
+
+def print_focal_distances(x):
+    """Print method for focal_distances results"""
+    if x is None:
+        return x
+    focal = x.attrs.get("focal", "?")
+    print(f"Focal distances from {focal}")
+    print(f"{len(x)} taxa • sorted closest → most distant\n")
+    print(x.to_string(index=False))
+    return x

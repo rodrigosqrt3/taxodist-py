@@ -221,6 +221,84 @@ def closest_relative(taxon, candidates, verbose=False):
     df = pd.DataFrame(results)
     return df.sort_values(by="distance", na_position='last').reset_index(drop=True)
 
+def focal_distances(focal, community, verbose=False, progress=True):
+    """
+    Compute distances from a focal taxon to a community of taxa
+
+    Given a focal taxon and a list of community taxa, retrieves all lineages
+    and computes the taxonomic distance from the focal taxon to each member
+    of the community. Returns a sorted DataFrame that also reports the most
+    recent common ancestor (MRCA) for each pair, making it easy to interpret
+    why a taxon is close or distant.
+
+    Parameters
+    ----------
+    focal : str
+        A character string giving the focal taxon name.
+    community : list of str
+        A list of community taxon names to compare against. The focal taxon
+        may be included — it will receive a distance of 0.
+    verbose : bool
+        If True, prints progress messages. Default False.
+    progress : bool
+        If True, prints progress status. Default True.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        A DataFrame with columns:
+        - taxon: str. Community taxon name.
+        - distance: float. Taxonomic distance to the focal taxon.
+        - mrca: str. Name of the most recent common ancestor.
+        - mrca_depth: int. Depth of the MRCA node.
+        Rows are sorted by distance ascending (closest relatives first).
+        Returns None if the focal taxon cannot be found.
+    """
+    focal_lin = get_lineage(focal, verbose=verbose)
+    if focal_lin is None:
+        print(f"Error: Could not retrieve lineage for {focal}")
+        return None
+
+    if progress:
+        print(f"Computing focal distances for {len(community)} taxa...")
+
+    results = []
+    for i, taxon in enumerate(community):
+        if progress:
+            print(f"  [{i + 1}/{len(community)}] {taxon}")
+
+        if taxon == focal:
+            results.append({
+                "taxon":      taxon,
+                "distance":   0.0,
+                "mrca":       focal,
+                "mrca_depth": len(focal_lin)
+            })
+        else:
+            cand_lin = get_lineage(taxon, verbose=verbose)
+            if cand_lin is None:
+                results.append({
+                    "taxon":      taxon,
+                    "distance":   float("nan"),
+                    "mrca":       None,
+                    "mrca_depth": None
+                })
+            else:
+                res = _compute_distance(focal_lin, cand_lin, focal, taxon)
+                results.append({
+                    "taxon":      taxon,
+                    "distance":   res["distance"],
+                    "mrca":       res["mrca"],
+                    "mrca_depth": res["mrca_depth"]
+                })
+
+    if progress:
+        print("Done.")
+
+    df = pd.DataFrame(results)
+    df = df.sort_values(by="distance", na_position="last").reset_index(drop=True)
+    df.attrs["focal"] = focal
+    return df
 
 def lineage_depth(taxon, verbose=False):
     """
