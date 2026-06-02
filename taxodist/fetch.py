@@ -192,7 +192,7 @@ def get_taxonomicon_id(taxon, verbose=False):
 
     for row in rows:
         text = row.get_text(separator=" ", strip=True)
-        if re.search(r"astronomical|planet|Minor planet|comet|asteroid", text, flags=re.IGNORECASE):
+        if re.search(r"\bastronomical\b|\bplanet\b|\bMinor planet\b|\bcomet\b|\bastronomy\b|\basteroid\b", text, flags=re.IGNORECASE):
             continue
 
         links_nodes = row.find_all("a", href=re.compile(r"TaxonTree"))
@@ -340,14 +340,14 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
         text = re.sub(r"^\[crown\]\s*(Clade|Grandorder|Order|Superorder|Infraorder|Suborder|Class|Superclass|Subclass|Infraclass|Family|Superfamily|Subfamily|Tribe|Subtribe|Kingdom|Subkingdom|Infrakingdom|Domain|Superkingdom|Phylum|Subphylum|Genus|Species)?\s*", "", text)
         text = re.sub(r"^(Clade |Kingdom |Phylum |Superphylum |Subphylum |Infraphylum |Class |Order |Suborder |Infraorder |Parvorder |Grandorder |Magnorder |Cohort |Subcohort |Legion |Family |Subfamily |Tribe |Subtribe |Genus |Species |Subkingdom |Infrakingdom |Superclass |Subclass |Infraclass |Superorder |Superfamily |Domain |Superkingdom |Grade |Subgrade |Supergrade )", "", text)
         text = re.sub(r"\s+et\s+al\..*$", "", text)
-        text = re.sub(r"\s+[A-Z][a-z]+-[A-Z][a-z]+.*$", "", text)
-        text = re.sub(r"\s+[A-Z][a-z]+\s*&.*$", "", text)
-        text = re.sub(r"\s+[A-Z][a-z]+,\s*\d{4}.*$", "", text)
-        text = re.sub(r"\s+[A-Z][a-z]+\s+\d{4}.*$", "", text)
-        text = re.sub(r"\s+[A-Z][a-z]+,.*$", "", text)
-        text = re.sub(r"\s+[A-Z][a-z]+\s*$", "", text)
+        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+-[A-Z][\w\u00C0-\u024F]+.*$", "", text)
+        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+\s*&.*$", "", text)
+        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+,\s*\d{4}.*$", "", text)
+        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+\s+\d{4}.*$", "", text)
+        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+,.*$", "", text)
+        text = re.sub(r"\s+von\b.*$", "", text)        # ← moved up
+        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+\s*$", "", text)
         text = re.sub(r"\s+[A-Z]\.[A-Z]\..*$", "", text)
-        text = re.sub(r"\s+von\b.*$", "", text)
         text = re.sub(r"\s+auct\..*$", "", text)
         text = re.sub(r"\s+de\s+[A-Z].*$", "", text)
         text = re.sub(r"[\u2020\u1D40]", "", text)
@@ -364,7 +364,7 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
 
     bare_ranks = {
         "Go to", "Subphylum", "Infraphylum", "Superphylum", "Subfamily", "Suborder",
-        "Infraorder", "Superclass", "Subclass", "Superfamily",
+        "Epifamily", "Infraorder", "Superclass", "Subclass", "Superfamily",
         "Subgenus", "Section", "Division", "Candidatus", "Parvphylum",
         "Branch", "Supercohort", "Infracohort", "Subdivision", "Subsection",
         "Grade", "[unranked]", "(Supercluster)", "(Region)",
@@ -503,7 +503,7 @@ def taxo_search(taxon, verbose=False):
     results =[]
     for row in rows:
         text = row.get_text(separator=" ", strip=True)
-        if re.search(r"astronomical|planet|Minor planet|comet|asteroid", text, flags=re.IGNORECASE):
+        if re.search(r"\bastronomical\b|\bplanet\b|\bMinor planet\b|\bcomet\b|\bastronomy\b|\basteroid\b", text, flags=re.IGNORECASE):
             continue
 
         links = row.find_all("a", href=re.compile(r"TaxonTree"))

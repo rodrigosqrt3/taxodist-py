@@ -20,6 +20,7 @@ Core functions
 - check_coverage() — check Taxonomicon coverage for a list of taxa
 - lineage_depth() — get the lineage depth of a taxon
 - clear_cache() — clear the session lineage cache
+- load_taxobase() — load the built-in reference dataset (50 clades)
 
 Mathematical background
 -----------------------
@@ -46,7 +47,7 @@ The Netherlands. Retrieved from The Taxonomicon,
 http://taxonomicon.taxonomy.nl.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.5.0"
 
 from .fetch import (
     clear_cache, save_cache, load_cache,
@@ -64,3 +65,5 @@ from .utils import (
     print_taxodist_result, plot_taxodist_cluster, plot_taxodist_ord,
     summary_taxodist_ord, print_taxodist_path
 )
+
+from .data import load_taxobase

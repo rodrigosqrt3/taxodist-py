@@ -16,6 +16,7 @@ from taxodist.fetch import (
     get_taxonomicon_id, get_lineage_by_id, get_lineage
 )
 from taxodist.utils import filter_clade, taxo_path, print_taxodist_path
+from taxodist.data import load_taxobase
 
 # ── Pure logic tests ──────────────────────────────────────────────────────────
 
@@ -1562,12 +1563,9 @@ def test_compare_lineages_prints_correctly(mock_get_lineage, capsys):
     assert "Tyrannosaurus only" in captured.out
     assert "Triceratops only" in captured.out
 
-    # ── COBERTURA CIRÚRGICA FINAL (Linhas exatas de fetch.py e utils.py) ──────────
-
 @patch("taxodist.fetch.get_taxonomicon_id")
 @patch("taxodist.fetch.get_lineage_by_id")
 def test_fetch_get_lineage_append_multiword(mock_get_lin, mock_get_id):
-    # Cobre fetch.py linha 407 (Adicionar taxon composto que não está na lista)
     mock_get_id.return_value = "123"
     mock_get_lin.return_value = ["Biota", "Animalia"]
     res = get_lineage("Homo sapiens")
@@ -1575,7 +1573,6 @@ def test_fetch_get_lineage_append_multiword(mock_get_lin, mock_get_id):
 
 @patch("taxodist.fetch.get_lineage_by_id")
 def test_fetch_get_lineage_return_none_for_empty_id(mock_get_lin):
-    # Cobre fetch.py linha 410 (Se for passado um ID numérico e ele retornar vazio)
     mock_get_lin.return_value =[]
     res = get_lineage("12345")
     assert res is None
@@ -1584,8 +1581,6 @@ def test_fetch_get_lineage_return_none_for_empty_id(mock_get_lin):
 @patch("matplotlib.pyplot.show")
 @patch("taxodist.utils.distance_matrix")
 def test_utils_taxo_heatmap_with_list_and_valid_data(mock_dist, mock_show, mock_sns):
-    # Cobre utils.py linhas 187 e 192-195
-    # Passamos uma lista para forçar o 'else: d = distance_matrix(taxa)'
     m = np.array([[0.0, 0.5], [0.5, 0.0]])
     df = pd.DataFrame(m, index=["A", "B"], columns=["A", "B"])
     mock_dist.return_value = df
@@ -1597,7 +1592,6 @@ def test_utils_taxo_heatmap_with_list_and_valid_data(mock_dist, mock_show, mock_
     mock_show.assert_called_once()
 
 def test_utils_summary_taxodist_ord_success(capsys):
-    # Cobre utils.py linhas 322-333 (Cálculo de variância do PCoA e print)
     points = pd.DataFrame([[1, 2],[3, 4]], index=["A", "B"], columns=["PC1", "PC2"])
     mock_ord = {
         "points": points,
@@ -1614,3 +1608,22 @@ def test_utils_summary_taxodist_ord_success(capsys):
     captured = capsys.readouterr()
     assert "PC1" in captured.out
     assert "PC2" in captured.out
+
+# ── Data / taxobase tests ─────────────────────────────────────────────────────
+
+def test_load_taxobase_returns_dict():
+    result = load_taxobase()
+    assert isinstance(result, dict)
+
+def test_load_taxobase_contains_all_required_keys():
+    result = load_taxobase()
+    expected_keys = {
+        "taxa", "found_taxa", "coverage", "matrix", "pairwise",
+        "lineage_homo", "lineage_tyrannosaurus", "closest", "filter", "search"
+    }
+    assert set(result.keys()) == expected_keys
+
+def test_load_taxobase_dimensions_are_correct():
+    result = load_taxobase()
+    assert len(result["taxa"]) == 50
+    assert len(result["matrix"]) == 50

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taxodist"
-version = "0.4.0"
+version = "0.5.0"
 authors =[
   { name="Rodrigo Fonseca Villa", email="rodrigo03.villa@gmail.com" }
 ]
@@ -29,6 +29,9 @@ dependencies =[
     "seaborn>=0.11.0",
     "lxml>=4.9.0"
 ]
+
+[tool.setuptools.package-data]
+taxodist = ["data/*.json"]
 
 [project.urls]
 "Homepage" = "https://github.com/rodrigosqrt3/taxodist"
