@@ -221,6 +221,18 @@ def get_taxonomicon_id(taxon, verbose=False):
 
         bio_ids.append({"id": id_val, "text": text_entry})
 
+    if len(bio_ids) > 1:
+        matched = []
+        for entry in bio_ids:
+            lin = get_lineage_by_id(entry["id"], clean=True, verbose=False)
+            if lin is not None:
+                # Match the taxon name as a distinct word in the lineage list
+                word_pattern = rf"\b{re.escape(str(taxon))}\b"
+                if any(re.search(word_pattern, node, flags=re.IGNORECASE) for node in lin):
+                    matched.append(entry)
+        if matched:
+            bio_ids = matched
+            
     if not bio_ids:
         if verbose:
             print(f"{taxon} not found in Taxonomicon")
@@ -318,24 +330,68 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
         return None
 
     soup = BeautifulSoup(res.text, "lxml")
-    links = soup.find_all("a", href=re.compile(r"TaxonTree"))
-
-    hrefs_all =[a.get("href", "") for a in links]
-    valid_links =[a for a, h in zip(links, hrefs_all) if re.search(r"id=[0-9]", h)]
-    hrefs_all =[h for h in hrefs_all if re.search(r"id=[0-9]", h)]
-
-    hrefs = [a.get("href", "") for a in valid_links]
-    own_pattern = f"id={taxon_id}(&|$)"
+    subject_node = soup.select_one("#ctl00_divSubject b")
+    content_node = soup.select_one("#divPageContent")
     
-    own_idx = [i for i, h in enumerate(hrefs) if re.search(own_pattern, h)]
-    if own_idx:
-        valid_links = valid_links[:max(own_idx) + 1]
+    current_name = subject_node.get_text(strip=True) if subject_node else None
+    
+    use_text_parsing = False
+    texts = []
+    
+    if current_name and content_node:
+        tree_text = content_node.get_text()
+        raw_lines = [line.strip() for line in tree_text.split("\n")]
+        raw_lines = [line for line in raw_lines if line]
+        
+        # Locate where tree starts (Natura)
+        tree_start_idx = None
+        for idx, line in enumerate(raw_lines):
+            if line.startswith("Natura"):
+                tree_start_idx = idx
+                break
+        
+        if tree_start_idx is not None:
+            raw_lines = raw_lines[tree_start_idx:]
+            
+        # Clean daggers for indexing safety
+        raw_lines_search = [re.sub(r"[\u2020\u1D40†]", "", line) for line in raw_lines]
+        
+        # Cut off raw lines once the current name is matched as a distinct word
+        word_pattern = rf"\b{re.escape(current_name)}\b"
+        cutoff_idx = None
+        for idx, line in enumerate(raw_lines_search):
+            if re.search(word_pattern, line, flags=re.IGNORECASE):
+                cutoff_idx = idx
+                break
+                
+        if cutoff_idx is not None:
+            texts = raw_lines[:cutoff_idx + 1]
+            use_text_parsing = True
+        else:
+            texts = raw_lines
+            use_text_parsing = True
+            
+    if not use_text_parsing:
+        # Fallback to your robust link-based extraction method
+        links = soup.find_all("a", href=re.compile(r"TaxonTree"))
+        hrefs_all = [a.get("href", "") for a in links]
+        valid_links = [a for a, h in zip(links, hrefs_all) if re.search(r"id=[0-9]", h)]
+        hrefs_all = [h for h in hrefs_all if re.search(r"id=[0-9]", h)]
+
+        hrefs = [a.get("href", "") for a in valid_links]
+        own_pattern = f"id={taxon_id}(&|$)"
+        
+        own_idx = [i for i, h in enumerate(hrefs) if re.search(own_pattern, h)]
+        if own_idx:
+            valid_links = valid_links[:max(own_idx) + 1]
+            
+        texts = [a.get_text(separator=" ", strip=True) for a in valid_links]
 
     lineage = []
 
-    for a in valid_links:
-        text = a.get_text(separator=" ", strip=True)        
-        text = re.sub(r"[\u2020\u1D40†]", "", text)
+    # Clean the extracted strings (either raw text lines or link labels)
+    for raw_text in texts:
+        text = re.sub(r"[\u2020\u1D40†]", "", raw_text)
         text = re.sub(r"\s+", " ", text).strip()
         text = re.sub(r"^\[crown\]\s*(Clade|Grandorder|Order|Superorder|Infraorder|Suborder|Class|Superclass|Subclass|Infraclass|Family|Superfamily|Subfamily|Tribe|Subtribe|Kingdom|Subkingdom|Infrakingdom|Domain|Superkingdom|Phylum|Subphylum|Genus|Species)?\s*", "", text)
         text = re.sub(r"^(Clade |Kingdom |Phylum |Superphylum |Subphylum |Infraphylum |Class |Order |Suborder |Infraorder |Parvorder |Grandorder |Magnorder |Cohort |Subcohort |Legion |Family |Subfamily |Tribe |Subtribe |Genus |Species |Subkingdom |Infrakingdom |Superclass |Subclass |Infraclass |Superorder |Superfamily |Domain |Superkingdom |Grade |Subgrade |Supergrade )", "", text)
@@ -345,7 +401,7 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
         text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+,\s*\d{4}.*$", "", text)
         text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+\s+\d{4}.*$", "", text)
         text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+,.*$", "", text)
-        text = re.sub(r"\s+von\b.*$", "", text)        # ← moved up
+        text = re.sub(r"\s+von\b.*$", "", text)
         text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+\s*$", "", text)
         text = re.sub(r"\s+[A-Z]\.[A-Z]\..*$", "", text)
         text = re.sub(r"\s+auct\..*$", "", text)

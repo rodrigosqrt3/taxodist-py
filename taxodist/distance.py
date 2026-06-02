@@ -38,7 +38,7 @@ def _compute_distance(lin_a, lin_b, name_a="A", name_b="B"):
     
     mrca_name = lin_a[mrca_depth - 1]
     
-    is_ancestral = (mrca_name == lin_a[-1]) or (mrca_name == lin_b[-1]) or (name_a in lin_b) or (name_b in lin_a)
+    is_ancestral = (lin_a[-1] in lin_b) or (lin_b[-1] in lin_a)
     distance = 0.0 if is_ancestral else 1.0 / mrca_depth
 
     return {
