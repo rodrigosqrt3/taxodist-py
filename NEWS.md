@@ -106,3 +106,28 @@
   rank prefix and a taxon name (e.g., `Family † Dromaeosauridae`) caused the
   taxon to be lost entirely. Dagger removal now precedes all other cleaning
   steps.
+  
+# taxodist 0.5.0
+
+## New features
+
+* `taxobase`: Added a built-in reference dataset containing 50 taxonomic clades. 
+   The dataset includes pre-computed distance matrices, lineage paths, search 
+   outputs, and coverage vectors. It acts as a complete offline fallback, allowing 
+   package examples, vignettes, and unit tests to run instantly without requiring 
+   a network connection to The Taxonomicon.
+
+## Bug fixes
+
+* Fixed a bug where any taxon whose name contains the substring
+  "planet" (e.g. *Periplaneta*) was incorrectly discarded by the astronomical
+  homonym filter in `get_taxonomicon_id()` and `taxo_search()`. The filter
+  now uses word boundaries (`\bplanet\b`) so that genus names containing
+  "planet" as an infix are no longer mistakenly treated as non-biological
+  entries.
+* Fixed a lineage parsing bug affecting genera whose Taxonomicon page does
+  not link back to the genus itself (e.g. *Periplaneta*, which only links
+  to its constituent species). The lineage is now correctly truncated before
+  child species entries, and the genus name is appended if absent.
+* Added `"Epifamily"` to the bare rank token filter so that unprefixed rank
+  labels are not retained as spurious lineage nodes.
