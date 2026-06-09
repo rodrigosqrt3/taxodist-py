@@ -33,6 +33,9 @@ dependencies =[
 [tool.setuptools.package-data]
 taxodist = ["data/*.json"]
 
+[tool.setuptools.packages.find]
+include = ["taxodist", "taxodist.*"]
+
 [project.urls]
 "Homepage" = "https://github.com/rodrigosqrt3/taxodist"
 "Bug Tracker" = "https://github.com/rodrigosqrt3/taxodist/issues"
