@@ -1,8 +1,6 @@
-# taxodist
+# taxodist <picture><source media="(prefers-color-scheme: dark)" srcset="images/taxodist_dark.png"><source media="(prefers-color-scheme: light)" srcset="images/taxodist_sepia.png"><img alt="taxodist logo" src="images/taxodist_sepia.png" align="right" height="200"></picture>
 
-[![PyPI version](https://img.shields.io/pypi/v/taxodist.svg?color=blue)](https://pypi.org/project/taxodist/)
-[![Python Tests](https://github.com/rodrigosqrt3/taxodist-py/actions/workflows/python-app.yml/badge.svg)](https://github.com/rodrigosqrt3/taxodist-py/actions/workflows/python-app.yml)
-[![Coverage](https://codecov.io/gh/rodrigosqrt3/taxodist-py/branch/main/graph/badge.svg)](https://codecov.io/gh/rodrigosqrt3/taxodist-py)
+[![PyPI version](https://img.shields.io/pypi/v/taxodist.svg?color=blue)](https://pypi.org/project/taxodist/) &nbsp; [![Python Tests](https://github.com/rodrigosqrt3/taxodist-py/actions/workflows/python-app.yml/badge.svg)](https://github.com/rodrigosqrt3/taxodist-py/actions/workflows/python-app.yml) &nbsp; [![codecov](https://codecov.io/gh/rodrigosqrt3/taxodist-py/branch/main/graph/badge.svg)](https://app.codecov.io/gh/rodrigosqrt3/taxodist-py)
 
 **Taxonomic distance and phylogenetic lineage computation for any taxon on Earth.**
 
