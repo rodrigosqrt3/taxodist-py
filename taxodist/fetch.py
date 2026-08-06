@@ -1,5 +1,4 @@
 import os
-from pydoc import text
 import re
 import pickle
 import urllib.parse
@@ -9,6 +8,50 @@ from bs4 import BeautifulSoup
 import pandas as pd
 
 _taxodist_cache = {}
+
+_RANK_PREFIXES = (
+    "Clade|Kingdom|Phylum|Superphylum|Subphylum|Infraphylum|Class|Order|"
+    "Suborder|Infraorder|Parvorder|Grandorder|Magnorder|Cohort|Subcohort|"
+    "Legion|Family|Subfamily|Tribe|Subtribe|Genus|Species|Subkingdom|"
+    "Infrakingdom|Superclass|Subclass|Infraclass|Superorder|Superfamily|"
+    "Domain|Superkingdom|Grade|Subgrade|Supergrade"
+)
+
+_BARE_RANKS = {
+    "Go to", "Superphylum", "Subfamily", "Suborder", "Epifamily",
+    "Infraorder", "Superclass", "Subclass", "Superfamily", "Subgenus",
+    "Section", "Division", "Candidatus", "Parvphylum", "Branch",
+    "Supercohort", "Infracohort", "Subdivision", "Subsection", "Grade",
+    "[unranked]", "(Supercluster)", "(Region)", "[crown]", ""
+}
+
+
+def _clean_lineage_label(raw_text):
+    """Apply the same lineage-label cleaning sequence as taxodist for R."""
+    text = re.sub(r"[\u2020\u1D40]", "", str(raw_text))
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(
+        rf"^\[crown\]\s+({_RANK_PREFIXES})?\s*",
+        "",
+        text,
+    )
+    text = re.sub(rf"^({_RANK_PREFIXES}) ", "", text)
+    text = re.sub(
+        r"\s+[A-Z][a-záàâãéèêíïóôõöúüç].*$",
+        "",
+        text,
+    )
+    text = re.sub(r"\s+[A-Z]\.[A-Z]\..*$", "", text)
+    text = re.sub(r"\s+auct\..*$", "", text)
+    text = re.sub(r"\s+von.*$", "", text)
+    text = re.sub(r"\s+\([A-Z][a-z].*$", "", text)
+    text = re.sub(r"\s+\(\d{4}\).*$", "", text)
+    text = re.sub(r"\s+\[.*$", "", text)
+    text = re.sub(r"\s+[A-Z]\.$", "", text)
+    text = re.sub(r"\s+\([a-z].*$", "", text)
+    text = re.sub(r'\s+".*$', "", text)
+    text = re.sub(r'^".*', "", text)
+    return text.strip()
 
 
 def clear_cache():
@@ -32,14 +75,14 @@ def save_cache(file):
     """
     Save the taxodist lineage cache to disk
 
-    Serialises the current session cache to an `.rds` file so it can be
+    Serialises the current session cache to a pickle file so it can be
     restored in a future session with load_cache(). Useful for
     reproducibility and for avoiding repeated network requests.
 
     Parameters
     ----------
     file : str
-        Path to the `.rds` file to write.
+        Path to the pickle file to write (the `.pkl` extension is recommended).
 
     Returns
     -------
@@ -47,7 +90,7 @@ def save_cache(file):
         Invisibly returns None.
     """
     with open(file, 'wb') as f:
-        pickle.dump(_taxodist_cache, f)
+        pickle.dump(dict(_taxodist_cache), f, protocol=pickle.HIGHEST_PROTOCOL)
     print(f"Cache saved to '{file}' ({len(_taxodist_cache)} entries).")
     return None
 
@@ -63,7 +106,7 @@ def load_cache(file):
     Parameters
     ----------
     file : str
-        Path to an `.rds` file created by save_cache().
+        Path to a pickle file created by save_cache().
 
     Returns
     -------
@@ -75,7 +118,29 @@ def load_cache(file):
         raise FileNotFoundError(f"Cache file not found: '{file}'")
     with open(file, 'rb') as f:
         data = pickle.load(f)
-        _taxodist_cache.update(data)
+
+    if not isinstance(data, dict):
+        raise ValueError("Invalid cache file: expected a dictionary created by save_cache().")
+
+    if any(not isinstance(key, str) or not key for key in data):
+        raise ValueError("Invalid cache file: cache keys must be non-empty strings.")
+
+    for key, value in data.items():
+        if key.startswith("id_"):
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    "Invalid cache file: taxon ID entries must be non-empty strings."
+                )
+        elif key.startswith("lin_"):
+            if not isinstance(value, (list, tuple)) or not all(
+                isinstance(node, str) for node in value
+            ):
+                raise ValueError(
+                    "Invalid cache file: lineage entries must be sequences of strings."
+                )
+
+    # Modify the active cache only after the complete file has been validated.
+    _taxodist_cache.update(data)
     print(f"Cache loaded from '{file}' ({len(data)} entries).")
     return None
 
@@ -167,7 +232,7 @@ def get_taxonomicon_id(taxon, verbose=False):
 
     safe_taxon = urllib.parse.quote(str(taxon))
     url = f"http://taxonomicon.taxonomy.nl/TaxonList.aspx?subject=Entity&by=ScientificName&search={safe_taxon}"
-    headers = {"User-Agent": "taxodist R package/0.3"}
+    headers = {"User-Agent": "taxodist Python package/0.6.0"}
 
     try:
         res = requests.get(url, headers=headers, timeout=30)
@@ -316,7 +381,7 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
         return _taxodist_cache[cache_key]
 
     url = f"http://taxonomicon.taxonomy.nl/TaxonTree.aspx?id={taxon_id}&src=0"
-    headers = {"User-Agent": "taxodist R package/0.3"}
+    headers = {"User-Agent": "taxodist Python package/0.6.0"}
 
     try:
         res = requests.get(url, headers=headers, timeout=30)
@@ -387,47 +452,8 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
             
         texts = [a.get_text(separator=" ", strip=True) for a in valid_links]
 
-    lineage = []
-
-    # Clean the extracted strings (either raw text lines or link labels)
-    for raw_text in texts:
-        text = re.sub(r"[\u2020\u1D40†]", "", raw_text)
-        text = re.sub(r"\s+", " ", text).strip()
-        text = re.sub(r"^\[crown\]\s*(Clade|Grandorder|Order|Superorder|Infraorder|Suborder|Class|Superclass|Subclass|Infraclass|Family|Superfamily|Subfamily|Tribe|Subtribe|Kingdom|Subkingdom|Infrakingdom|Domain|Superkingdom|Phylum|Subphylum|Genus|Species)?\s*", "", text)
-        text = re.sub(r"^(Clade |Kingdom |Phylum |Superphylum |Subphylum |Infraphylum |Class |Order |Suborder |Infraorder |Parvorder |Grandorder |Magnorder |Cohort |Subcohort |Legion |Family |Subfamily |Tribe |Subtribe |Genus |Species |Subkingdom |Infrakingdom |Superclass |Subclass |Infraclass |Superorder |Superfamily |Domain |Superkingdom |Grade |Subgrade |Supergrade )", "", text)
-        text = re.sub(r"\s+et\s+al\..*$", "", text)
-        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+-[A-Z][\w\u00C0-\u024F]+.*$", "", text)
-        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+\s*&.*$", "", text)
-        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+,\s*\d{4}.*$", "", text)
-        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+\s+\d{4}.*$", "", text)
-        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+,.*$", "", text)
-        text = re.sub(r"\s+von\b.*$", "", text)
-        text = re.sub(r"\s+[A-Z][\w\u00C0-\u024F]+\s*$", "", text)
-        text = re.sub(r"\s+[A-Z]\.[A-Z]\..*$", "", text)
-        text = re.sub(r"\s+auct\..*$", "", text)
-        text = re.sub(r"\s+de\s+[A-Z].*$", "", text)
-        text = re.sub(r"[\u2020\u1D40]", "", text)
-        text = re.sub(r"\s+\([A-Z][a-z].*$", "", text)
-        text = re.sub(r"\s+\(\d{4}\).*$", "", text)
-        text = re.sub(r"\s+\[.*$", "", text)
-        text = re.sub(r"\s+[A-Z]\.$", "", text)
-        text = re.sub(r"\s+\([a-z].*$", "", text)
-        text = re.sub(r'\s+".*$', "", text)
-        text = re.sub(r'^".*', "", text)
-        text = re.sub(r"\s+\d{4}.*$", "", text)
-        text = text.strip()
-        lineage.append(text)
-
-    bare_ranks = {
-        "Go to", "Subphylum", "Infraphylum", "Superphylum", "Subfamily", "Suborder",
-        "Epifamily", "Infraorder", "Superclass", "Subclass", "Superfamily",
-        "Subgenus", "Section", "Division", "Candidatus", "Parvphylum",
-        "Branch", "Supercohort", "Infracohort", "Subdivision", "Subsection",
-        "Grade", "[unranked]", "(Supercluster)", "(Region)",
-        "[crown]", ""
-    }
-
-    lineage = [x for x in lineage if x not in bare_ranks]
+    lineage = [_clean_lineage_label(raw_text) for raw_text in texts]
+    lineage = [x for x in lineage if x not in _BARE_RANKS]
     lineage =[x for x in lineage if x != "" and not re.match(r"^\s*$", x)]
     lineage = [x for x in lineage if not x.startswith('"')]
     lineage = [x for x in lineage if not x.startswith("Population")]
@@ -540,7 +566,7 @@ def taxo_search(taxon, verbose=False):
 
     safe_taxon = urllib.parse.quote(str(taxon))
     url = f"http://taxonomicon.taxonomy.nl/TaxonList.aspx?subject=Entity&by=ScientificName&search={safe_taxon}"
-    headers = {"User-Agent": "taxodist R package/0.3"}
+    headers = {"User-Agent": "taxodist Python package/0.6.0"}
 
     try:  
         res = requests.get(url, headers=headers, timeout=30)

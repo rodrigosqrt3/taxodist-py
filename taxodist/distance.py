@@ -1,5 +1,5 @@
-import math
 import warnings
+from numbers import Real
 import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import linkage
@@ -15,13 +15,15 @@ def _compute_distance(lin_a, lin_b, name_a="A", name_b="B"):
     depth_a = len(lin_a)
     depth_b = len(lin_b)
 
-    shared =[]
-    set_b = set(lin_b)
-    for x in lin_a:
-        if x in set_b and x not in shared:
-            shared.append(x)
+    # Shared ancestry is the continuous common prefix from the root. A name
+    # repeated after divergence is a homonym, not a shared hierarchy node.
+    mrca_depth = 0
+    for node_a, node_b in zip(lin_a, lin_b):
+        if node_a != node_b:
+            break
+        mrca_depth += 1
 
-    if not shared:
+    if mrca_depth == 0:
         return {
             "distance": float('inf'),
             "mrca": None,
@@ -32,14 +34,9 @@ def _compute_distance(lin_a, lin_b, name_a="A", name_b="B"):
             "taxon_b": name_b
         }
 
-    positions_in_a =[lin_a.index(x) + 1 for x in shared]
-    mrca_idx = positions_in_a.index(max(positions_in_a))
-    mrca_depth = positions_in_a[mrca_idx]
-    
     mrca_name = lin_a[mrca_depth - 1]
-    
-    is_ancestral = (lin_a[-1] in lin_b) or (lin_b[-1] in lin_a)
-    distance = 0.0 if is_ancestral else 1.0 / mrca_depth
+    same_lineage = list(lin_a) == list(lin_b)
+    distance = 0.0 if same_lineage else 1.0 / mrca_depth
 
     return {
         "distance": distance,
@@ -54,7 +51,7 @@ def _compute_distance(lin_a, lin_b, name_a="A", name_b="B"):
 
 def taxo_distance(taxon_a, taxon_b, verbose=False):
     """
-    Compute the phylogenetic distance between two taxa
+    Compute the taxonomic hierarchy distance between two taxa
 
     Given two taxon names, retrieves their lineages from The Taxonomicon and
     computes a taxonomic distance based on the depth of their most recent
@@ -81,7 +78,8 @@ def taxo_distance(taxon_a, taxon_b, verbose=False):
     dict or None
         A dictionary with the following elements:
         - distance: Numeric. The distance between the two taxa. Returns 0
-          if one taxon is an ancestor of the other.
+          only when their complete lineages are identical. Distinct
+          ancestor-descendant nodes have positive distance.
         - mrca: Character. The name of the most recent common ancestor.
         - mrca_depth: Integer. The depth of the MRCA node.
         - depth_a: Integer. The lineage depth of taxon A.
@@ -134,7 +132,8 @@ def distance_matrix(taxa, verbose=False, progress=True):
     """
     Compute pairwise taxonomic distances for a set of taxa
 
-    Given a list of taxon names, computes all pairwise phylogenetic distances
+    Given a list of taxon names, computes all pairwise taxonomic hierarchy
+    distances
     and returns a symmetric distance matrix. Lineages are cached after first
     retrieval to minimise redundant network requests.
 
@@ -209,6 +208,12 @@ def closest_relative(taxon, candidates, verbose=False):
         print(f"Error: Could not retrieve lineage for {taxon}")
         return None
 
+    if len(candidates) == 0:
+        return pd.DataFrame({
+            "taxon": pd.Series(dtype="object"),
+            "distance": pd.Series(dtype="float64")
+        })
+
     results =[]
     for cand in candidates:
         cand_lin = get_lineage(cand, verbose=verbose)
@@ -258,6 +263,16 @@ def focal_distances(focal, community, verbose=False, progress=True):
     if focal_lin is None:
         print(f"Error: Could not retrieve lineage for {focal}")
         return None
+
+    if len(community) == 0:
+        result = pd.DataFrame({
+            "taxon": pd.Series(dtype="object"),
+            "distance": pd.Series(dtype="float64"),
+            "mrca": pd.Series(dtype="object"),
+            "mrca_depth": pd.Series(dtype="Int64")
+        })
+        result.attrs["focal"] = focal
+        return result
 
     if progress:
         print(f"Computing focal distances for {len(community)} taxa...")
@@ -346,12 +361,11 @@ def check_coverage(taxa, verbose=False):
         A boolean Series indexed by taxon names. True indicates the taxon was found,
         False indicates it was not.
     """    
-    result = {}
-    for t in taxa:
-        res = get_taxonomicon_id(t, verbose=verbose)
-        result[t] = res is not None
-        
-    return pd.Series(result)
+    values = [
+        get_taxonomicon_id(t, verbose=verbose) is not None
+        for t in taxa
+    ]
+    return pd.Series(values, index=taxa, dtype=bool)
 
 
 def taxo_cluster(taxa, method="average", **kwargs):
@@ -386,6 +400,14 @@ def taxo_cluster(taxa, method="average", **kwargs):
 
     if np.isnan(d.values).any():
         warnings.warn("Distance matrix contains NaN values (taxa not found or server offline). Clustering skipped.")
+        return {"hclust": None, "dist": d}
+
+    if not np.isfinite(d.values).all():
+        warnings.warn("Distance matrix contains infinite values (no shared ancestor). Clustering skipped.")
+        return {"hclust": None, "dist": d}
+
+    if d.shape[0] < 2:
+        warnings.warn("At least two taxa are required for clustering. Clustering skipped.")
         return {"hclust": None, "dist": d}
 
     condensed_dist = squareform(d.values, checks=False)
@@ -429,8 +451,32 @@ def taxo_ordinate(taxa, k=2, **kwargs):
         warnings.warn("Distance matrix contains NaN values. Ordination skipped.")
         return {"points": None, "dist": d, "GOF": None, "eig": None}
 
+    if not np.isfinite(d.values).all():
+        warnings.warn("Distance matrix contains infinite values (no shared ancestor). Ordination skipped.")
+        return {"points": None, "dist": d, "GOF": None, "eig": None}
+
     mat = d.values
     n = mat.shape[0]
+
+    if n < 2:
+        warnings.warn("At least two taxa are required for ordination. Ordination skipped.")
+        return {"points": None, "dist": d, "GOF": None, "eig": None}
+
+    valid_k = (
+        not isinstance(k, (bool, np.bool_))
+        and isinstance(k, Real)
+        and np.isfinite(k)
+        and k >= 1
+        and float(k).is_integer()
+    )
+    if not valid_k:
+        raise ValueError("k must be a single positive integer.")
+    k = int(k)
+
+    max_k = n - 1
+    if k > max_k:
+        warnings.warn(f"k reduced from {k} to {max_k}, the maximum for {n} taxa.")
+        k = max_k
 
     A = -0.5 * (mat ** 2)
     J = np.eye(n) - np.ones((n, n)) / n
@@ -442,17 +488,29 @@ def taxo_ordinate(taxa, k=2, **kwargs):
     eigvals = eigvals[idx]
     eigvecs = eigvecs[:, idx]
 
-    eigvals_k = np.maximum(eigvals[:k], 0)
-    points = eigvecs[:, :k] * np.sqrt(eigvals_k)
-    
-    eig_pos = np.maximum(eigvals, 0)
-    gof_1 = np.sum(eigvals_k) / np.sum(eig_pos) if np.sum(eig_pos) > 0 else 0
-    gof_2 = np.sum(eigvals_k) / np.sum(np.abs(eigvals)) if np.sum(np.abs(eigvals)) > 0 else 0
+    selected_eigvals = eigvals[:k]
+    positive = selected_eigvals > 0
+    if np.count_nonzero(positive) < k:
+        warnings.warn(
+            f"only {np.count_nonzero(positive)} of the first {k} eigenvalues are > 0"
+        )
+
+    retained_eigvals = selected_eigvals[positive]
+    retained_vectors = eigvecs[:, :k][:, positive]
+    points = retained_vectors * np.sqrt(retained_eigvals)
+
+    numerator = np.sum(retained_eigvals)
+    absolute_total = np.sum(np.abs(eigvals))
+    positive_total = np.sum(np.maximum(eigvals, 0))
+    # Match stats::cmdscale(): GOF[0] uses all absolute eigenvalues and
+    # GOF[1] uses only the positive eigenvalue total.
+    gof_1 = numerator / absolute_total if absolute_total > 0 else float("nan")
+    gof_2 = numerator / positive_total if positive_total > 0 else float("nan")
 
     points_df = pd.DataFrame(
         points, 
         index=d.index, 
-        columns=[f"PC{i+1}" for i in range(k)]
+        columns=[f"PC{i+1}" for i in range(points.shape[1])]
     )
 
     return {

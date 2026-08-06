@@ -125,12 +125,9 @@ def is_member(taxon, clade, verbose=False):
     if lin is None:
         return None
 
-    clade_lower = clade.lower()
-    for node in lin:
-        if node.lower().startswith(clade_lower):
-            return True
-            
-    return False
+    normalized_clade = str(clade).strip().casefold()
+    normalized_lineage = [str(node).strip().casefold() for node in lin]
+    return normalized_clade in normalized_lineage
 
 
 def filter_clade(taxa, clade, verbose=False):
@@ -189,6 +186,12 @@ def taxo_heatmap(taxa, **kwargs):
     if np.isnan(d.values).any():
         warnings.warn("Distance matrix contains NaN values. Heatmap skipped.")
         return d
+    if not np.isfinite(d.values).all():
+        warnings.warn("Distance matrix contains infinite values (no shared ancestor). Heatmap skipped.")
+        return d
+    if d.shape[0] < 2:
+        warnings.warn("At least two taxa are required for a heatmap. Heatmap skipped.")
+        return d
     sns.clustermap(d, cmap="YlGnBu_r", annot=True, **kwargs)
     plt.show()
     
@@ -234,13 +237,19 @@ def taxo_path(taxon_a, taxon_b, verbose=False):
     result = _compute_distance(lin_a, lin_b, taxon_a, taxon_b)
     mrca_d = result["mrca_depth"]
 
-    path_data =[]
+    if mrca_d == 0:
+        warnings.warn(f"No common ancestor found for {taxon_a!r} and {taxon_b!r}.")
+        return None
 
-    if mrca_d > 0:
-        side_a_nodes = lin_a[:mrca_d][::-1]
-        depths_a = list(range(mrca_d - 1, 0, -1))
-        for i, node in enumerate(side_a_nodes[:-1]):
-            path_data.append({"node": node, "depth": depths_a[i], "direction": "a"})
+    path_data = []
+
+    # Ascend from taxon A to the node immediately below the MRCA.
+    for index in range(len(lin_a) - 1, mrca_d - 1, -1):
+        path_data.append({
+            "node": lin_a[index],
+            "depth": index + 1,
+            "direction": "a"
+        })
 
     path_data.append({
         "node": result["mrca"], 
@@ -248,10 +257,13 @@ def taxo_path(taxon_a, taxon_b, verbose=False):
         "direction": "mrca"
     })
 
-    side_b_nodes = lin_b[mrca_d:]
-    depths_b = list(range(1, len(side_b_nodes) + 1))
-    for i, node in enumerate(side_b_nodes):
-        path_data.append({"node": node, "depth": depths_b[i], "direction": "b"})
+    # Descend from the node immediately below the MRCA to taxon B.
+    for index in range(mrca_d, len(lin_b)):
+        path_data.append({
+            "node": lin_b[index],
+            "depth": index + 1,
+            "direction": "b"
+        })
 
     df = pd.DataFrame(path_data)
     df.attrs["taxon_a"] = taxon_a
@@ -292,15 +304,19 @@ def plot_taxodist_ord(x, main="Taxonomic Ordination (PCoA)", xlab="PC1", ylab="P
     points = x["points"]
     gof = round(x["GOF"][0], 3)
     
+    plot_points = points.iloc[:, :2].copy()
+    if plot_points.shape[1] == 1:
+        plot_points["PC2"] = 0.0
+
     plt.figure(figsize=(8, 6))
     # Cria o plot invisível (type="n" no R) para definir os limites
-    plt.scatter(points.iloc[:, 0], points.iloc[:, 1], alpha=0.0)
+    plt.scatter(plot_points.iloc[:, 0], plot_points.iloc[:, 1], alpha=0.0)
     
     if labels is None:
         labels = points.index
         
     for i, label in enumerate(labels):
-        plt.text(points.iloc[i, 0], points.iloc[i, 1], label, ha='center', va='center', **kwargs)
+        plt.text(plot_points.iloc[i, 0], plot_points.iloc[i, 1], label, ha='center', va='center', **kwargs)
         
     plt.title(f"{main}  (GOF = {gof})")
     plt.xlabel(xlab)

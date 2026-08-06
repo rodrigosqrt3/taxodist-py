@@ -1,19 +1,24 @@
+import math
 import os
+import pickle
 import tempfile
 import pytest
 import warnings
 import pandas as pd
-from unittest.mock import patch, Mock
+from unittest.mock import mock_open, patch, Mock
 import requests
 
 import taxodist.fetch as fetch
 import taxodist.distance as distance
 import taxodist.utils as utils
+import taxodist
+import taxodist.data as data_module
 
-from taxodist.distance import _compute_distance
+from taxodist.distance import _compute_distance, focal_distances
 from taxodist.fetch import (
     clear_cache, save_cache, load_cache, 
-    get_taxonomicon_id, get_lineage_by_id, get_lineage
+    get_taxonomicon_id, get_lineage_by_id, get_lineage,
+    _clean_lineage_label
 )
 from taxodist.utils import filter_clade, taxo_path, print_taxodist_path
 from taxodist.data import load_taxobase
@@ -93,11 +98,22 @@ def test_compute_distance_between_0_and_1_for_asymmetric_lineages():
     assert result["distance"] >= 0
     assert result["distance"] <= 1
 
-def test_compute_distance_returns_0_when_one_taxon_is_ancestor_of_other():
+def test_compute_distance_returns_positive_distance_when_one_taxon_is_ancestor_of_other():
     lin_a =["Biota", "Animalia", "Dinosauria"]
     lin_b =["Biota", "Animalia", "Dinosauria", "Theropoda", "Carnotaurus"]
     result = _compute_distance(lin_a, lin_b)
-    assert result["distance"] == 0
+    assert result["distance"] == pytest.approx(1 / 3)
+    assert result["mrca"] == "Dinosauria"
+    assert result["mrca_depth"] == 3
+
+
+def test_compute_distance_uses_only_the_continuous_common_prefix():
+    lin_a = ["Biota", "Animalia", "Alpha", "Repeated", "Taxon A"]
+    lin_b = ["Biota", "Animalia", "Beta", "Repeated", "Taxon B"]
+    result = _compute_distance(lin_a, lin_b)
+    assert result["mrca"] == "Animalia"
+    assert result["mrca_depth"] == 2
+    assert result["distance"] == pytest.approx(1 / 2)
 
 # ── Cache Tests ───────────────────────────────────────────────────────────────
 
@@ -107,7 +123,7 @@ def test_clear_cache_returns_invisible_null():
 def test_save_cache_creates_file_with_cache_contents():
     clear_cache()
     fetch._taxodist_cache["id_Carnotaurus"] = "12345"
-    with tempfile.NamedTemporaryFile(suffix=".rds", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
         tmp_name = tmp.name
     try:
         assert save_cache(tmp_name) is None
@@ -118,7 +134,7 @@ def test_save_cache_creates_file_with_cache_contents():
 def test_load_cache_restores_entries_into_the_cache():
     clear_cache()
     fetch._taxodist_cache["id_Carnotaurus"] = "12345"
-    with tempfile.NamedTemporaryFile(suffix=".rds", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
         tmp_name = tmp.name
     try:
         save_cache(tmp_name)
@@ -135,7 +151,7 @@ def test_save_load_cache_round_trip_preserves_all_entries():
     clear_cache()
     fetch._taxodist_cache["id_Tyrannosaurus"] = "50841"
     fetch._taxodist_cache["lin_50841"] =["Biota", "Animalia", "Dinosauria", "Tyrannosaurus"]
-    with tempfile.NamedTemporaryFile(suffix=".rds", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
         tmp_name = tmp.name
     try:
         save_cache(tmp_name)
@@ -149,11 +165,11 @@ def test_save_load_cache_round_trip_preserves_all_entries():
 
 def test_load_cache_errors_on_missing_file():
     with pytest.raises(FileNotFoundError):
-        load_cache("nonexistent_file.rds")
+        load_cache("nonexistent_file.pkl")
 
 def test_save_cache_returns_invisible_null():
     clear_cache()
-    with tempfile.NamedTemporaryFile(suffix=".rds", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
         tmp_name = tmp.name
     try:
         assert save_cache(tmp_name) is None
@@ -162,7 +178,7 @@ def test_save_cache_returns_invisible_null():
 
 def test_load_cache_returns_invisible_null():
     clear_cache()
-    with tempfile.NamedTemporaryFile(suffix=".rds", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
         tmp_name = tmp.name
     try:
         save_cache(tmp_name)
@@ -627,28 +643,6 @@ def test_lineage_depth_returns_none_when_lineage_not_found(mock_get_lineage):
     result = lineage_depth("Fakeosaurus")
     assert result is None
 
-@patch("taxodist.fetch.get_lineage_by_id")
-@patch("taxodist.fetch.requests.get")
-def test_get_taxonomicon_id_skips_astronomical_entries(mock_get, mock_get_lineage_by_id):
-    clear_cache()
-    mock_resp = Mock()
-    mock_resp.status_code = 200
-    mock_resp.text = '''
-    <html><body><table>
-      <tr>
-        <td>Carnotaurus - asteroid - Minor planet</td>
-        <td><a class="Valid" href="TaxonTree.aspx?id=99999&src=0">tree</a></td>
-      </tr>
-      <tr>
-        <td>Carnotaurus - animal - dinosaur</td>
-        <td><a class="Valid" href="TaxonTree.aspx?id=12345&src=0">tree</a></td>
-      </tr>
-    </table></body></html>'''
-    mock_get.return_value = mock_resp
-    mock_get_lineage_by_id.return_value = ["Biota", "Animalia"]
-    result = get_taxonomicon_id("Carnotaurus", verbose=True)
-    assert result == "12345"
-
 import requests
 from unittest.mock import patch, Mock
 import numpy as np
@@ -1067,15 +1061,17 @@ def test_taxo_distance_returns_valid_result_for_tyrannosaurus_vs_velociraptor():
     assert result["mrca"] == "Tyrannoraptora"
 
 @skip_if_offline
-def test_taxo_distance_returns_0_when_one_taxon_is_ancestor_of_other():
+def test_taxo_distance_returns_positive_distance_when_one_taxon_is_ancestor_of_other():
     clear_cache()
     res1 = taxo_distance("Tyrannosaurus", "Dinosauria")
     if res1 is not None:
-        assert res1["distance"] == 0 
+        assert res1["distance"] > 0
+        assert res1["distance"] == pytest.approx(1 / res1["mrca_depth"])
     
     res2 = taxo_distance("Carnotaurus", "Ceratosauria")
     if res2 is not None:
-        assert res2["distance"] == 0
+        assert res2["distance"] > 0
+        assert res2["distance"] == pytest.approx(1 / res2["mrca_depth"])
 
 @skip_if_offline
 def test_taxo_distance_between_carnotaurus_and_triceratops_is_valid():
@@ -1619,11 +1615,235 @@ def test_load_taxobase_contains_all_required_keys():
     result = load_taxobase()
     expected_keys = {
         "taxa", "found_taxa", "coverage", "matrix", "pairwise",
-        "lineage_homo", "lineage_tyrannosaurus", "closest", "filter", "search"
+        "lineage_homo", "lineage_tyrannosaurus", "closest", "filter", "search",
+        "statistical_taxa", "statistical_matrix", "metadata"
     }
     assert set(result.keys()) == expected_keys
 
 def test_load_taxobase_dimensions_are_correct():
     result = load_taxobase()
-    assert len(result["taxa"]) == 50
-    assert len(result["matrix"]) == 50
+    assert len(result["matrix"]) == len(result["found_taxa"])
+    assert result["matrix"].shape == (
+        len(result["found_taxa"]), len(result["found_taxa"])
+    )
+    assert len(result["coverage"]) == len(result["taxa"])
+
+# ── Version 0.6.0 behavioral contract ────────────────────────────────────────
+
+def test_version_and_public_api_match_release_060():
+    assert taxodist.__version__ == "0.6.0"
+    expected = {
+        "cache_info", "check_coverage", "clear_cache", "closest_relative",
+        "compare_lineages", "distance_matrix", "filter_clade",
+        "focal_distances", "get_lineage", "get_lineage_by_id",
+        "get_taxonomicon_id", "is_member", "lineage_depth", "load_cache",
+        "load_taxobase", "mrca", "save_cache", "shared_clades",
+        "taxo_cluster", "taxo_distance", "taxo_heatmap", "taxo_ordinate",
+        "taxo_path", "taxo_search"
+    }
+    assert all(callable(getattr(taxodist, name, None)) for name in expected)
+
+
+def test_identical_nodes_are_the_only_finite_zero_distance():
+    lineage = ["Biota", "Animalia", "Dinosauria"]
+    descendant = lineage + ["Theropoda", "Tyrannosaurus"]
+
+    assert _compute_distance(lineage, lineage)["distance"] == 0
+    assert _compute_distance(lineage, descendant)["distance"] == pytest.approx(1 / 3)
+
+
+def test_no_common_root_returns_infinite_distance_and_no_mrca():
+    result = _compute_distance(["Biota"], ["Natura"])
+    assert math.isinf(result["distance"])
+    assert result["mrca"] is None
+    assert result["mrca_depth"] == 0
+
+
+def test_repeated_name_after_divergence_is_not_shared_ancestry():
+    result = _compute_distance(
+        ["Biota", "Animalia", "Alpha", "Homonym", "A"],
+        ["Biota", "Animalia", "Beta", "Homonym", "B"],
+    )
+    assert result["mrca"] == "Animalia"
+    assert result["mrca_depth"] == 2
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("Subphylum † Craniata auct.", "Craniata"),
+        ("Family † Dromaeosauridae Gauthier, 1986", "Dromaeosauridae"),
+        ("Clade Romeriida Gauthier,", "Romeriida"),
+        ("Homo sapiens", "Homo sapiens"),
+        ("[crown] Clade Dinosauria", "Dinosauria"),
+    ],
+)
+def test_lineage_label_cleaning_matches_the_r_pipeline(raw, expected):
+    assert _clean_lineage_label(raw) == expected
+
+
+@patch("taxodist.distance.get_lineage")
+def test_empty_distance_inputs_return_stable_shapes(mock_get_lineage):
+    empty = distance_matrix([], progress=False)
+    assert empty.shape == (0, 0)
+
+    mock_get_lineage.return_value = ["Biota", "Animalia"]
+    closest = closest_relative("Animalia", [])
+    focal = focal_distances("Animalia", [], progress=False)
+    assert list(closest.columns) == ["taxon", "distance"]
+    assert list(focal.columns) == ["taxon", "distance", "mrca", "mrca_depth"]
+    assert closest.empty
+    assert focal.empty
+
+
+@patch("taxodist.utils.get_lineage")
+def test_membership_is_exact_case_insensitive_and_trimmed(mock_get_lineage):
+    mock_get_lineage.return_value = ["Biota", "Animalia", "Dinosauria"]
+    assert is_member("Tyrannosaurus", " dinosauria ") is True
+    assert is_member("Tyrannosaurus", "DINOSAURIA") is True
+    assert is_member("Tyrannosaurus", "Dino") is False
+
+
+@patch("taxodist.utils.get_lineage")
+def test_taxonomic_path_preserves_full_depths_and_direction(mock_get_lineage):
+    lineages = {
+        "A": ["Biota", "Animalia", "Dinosauria", "Theropoda", "A"],
+        "B": ["Biota", "Animalia", "Dinosauria", "Ornithischia", "B"],
+    }
+    mock_get_lineage.side_effect = lambda taxon, **_: lineages[taxon]
+
+    path = taxo_path("A", "B")
+    assert path.to_dict("records") == [
+        {"node": "A", "depth": 5, "direction": "a"},
+        {"node": "Theropoda", "depth": 4, "direction": "a"},
+        {"node": "Dinosauria", "depth": 3, "direction": "mrca"},
+        {"node": "Ornithischia", "depth": 4, "direction": "b"},
+        {"node": "B", "depth": 5, "direction": "b"},
+    ]
+
+
+@patch("taxodist.utils.get_lineage")
+def test_taxonomic_path_returns_none_without_common_ancestor(mock_get_lineage):
+    mock_get_lineage.side_effect = [["Biota"], ["Natura"]]
+    with pytest.warns(UserWarning, match="No common ancestor"):
+        assert taxo_path("A", "B") is None
+
+
+def test_analysis_helpers_skip_nonfinite_and_too_small_matrices():
+    nonfinite = pd.DataFrame(
+        [[0.0, np.inf], [np.inf, 0.0]], index=["A", "B"], columns=["A", "B"]
+    )
+    singleton = pd.DataFrame([[0.0]], index=["A"], columns=["A"])
+
+    with pytest.warns(UserWarning, match="infinite"):
+        assert taxo_cluster(nonfinite)["hclust"] is None
+    with pytest.warns(UserWarning, match="infinite"):
+        assert taxo_ordinate(nonfinite)["points"] is None
+    with pytest.warns(UserWarning, match="At least two"):
+        assert taxo_cluster(singleton)["hclust"] is None
+    with pytest.warns(UserWarning, match="At least two"):
+        assert taxo_ordinate(singleton)["points"] is None
+
+
+def test_heatmap_skips_nonfinite_and_too_small_matrices():
+    nonfinite = pd.DataFrame(
+        [[0.0, np.inf], [np.inf, 0.0]], index=["A", "B"], columns=["A", "B"]
+    )
+    singleton = pd.DataFrame([[0.0]], index=["A"], columns=["A"])
+
+    with pytest.warns(UserWarning, match="infinite"):
+        assert taxo_heatmap(nonfinite) is nonfinite
+    with pytest.warns(UserWarning, match="At least two"):
+        assert taxo_heatmap(singleton) is singleton
+
+
+def test_ordination_reduces_k_and_rejects_invalid_values():
+    matrix = pd.DataFrame(
+        [[0.0, 0.2], [0.2, 0.0]], index=["A", "B"], columns=["A", "B"]
+    )
+    with pytest.warns(UserWarning, match="k reduced"):
+        result = taxo_ordinate(matrix, k=2)
+    assert result["points"].shape == (2, 1)
+
+    result_from_integral_float = taxo_ordinate(matrix, k=1.0)
+    assert result_from_integral_float["points"].shape == (2, 1)
+
+    for invalid in (0, -1, 1.5, True):
+        with pytest.raises(ValueError, match="positive integer"):
+            taxo_ordinate(matrix, k=invalid)
+
+
+def test_ordination_gof_order_matches_r_cmdscale():
+    # This deliberately non-Euclidean dissimilarity has a negative eigenvalue,
+    # making the two cmdscale GOF denominators distinguishable.
+    matrix = pd.DataFrame(
+        [[0.0, 1.0, 1.0], [1.0, 0.0, 3.0], [1.0, 3.0, 0.0]],
+        index=["A", "B", "C"],
+        columns=["A", "B", "C"],
+    )
+    result = taxo_ordinate(matrix, k=1)
+    eig = result["eig"]
+    numerator = eig[0]
+    assert result["GOF"][0] == pytest.approx(numerator / np.abs(eig).sum())
+    assert result["GOF"][1] == pytest.approx(
+        numerator / np.maximum(eig, 0).sum()
+    )
+    assert result["GOF"][0] <= result["GOF"][1]
+
+
+def test_ordination_zero_geometry_matches_cmdscale_empty_embedding():
+    matrix = pd.DataFrame(
+        np.zeros((2, 2)), index=["A", "B"], columns=["A", "B"]
+    )
+    with pytest.warns(UserWarning, match="eigenvalues are > 0"):
+        result = taxo_ordinate(matrix, k=1)
+    assert result["points"].shape == (2, 0)
+    assert np.isnan(result["GOF"]).all()
+
+
+@patch("matplotlib.pyplot.show")
+def test_ordination_plot_supports_a_single_coordinate(mock_show):
+    points = pd.DataFrame({"PC1": [0.1, -0.1]}, index=["A", "B"])
+    result = {"points": points, "GOF": [1.0]}
+
+    assert plot_taxodist_ord(result) is result
+    mock_show.assert_called_once()
+
+
+def test_taxobase_loader_supports_legacy_matrix_and_coverage_formats():
+    assert data_module._matrix_from_json([[0.0]], ["A"]).loc["A", "A"] == 0.0
+
+    legacy = {
+        "taxa": ["A", "B"],
+        "found_taxa": ["A", "B"],
+        "coverage": [True, False],
+        "matrix": [[0.0, 0.5], [0.5, 0.0]],
+    }
+    with patch("builtins.open", mock_open(read_data="{}")), patch(
+        "taxodist.data.json.load", return_value=legacy
+    ):
+        loaded = data_module.load_taxobase()
+
+    assert loaded["coverage"].to_dict() == {"A": True, "B": False}
+    assert loaded["metadata"]["package_version"] == "legacy"
+
+
+@pytest.mark.parametrize(
+    "payload, message",
+    [
+        (["not", "a", "dictionary"], "expected a dictionary"),
+        ({"": "invalid"}, "cache keys"),
+        ({"id_A": 123}, "taxon ID entries"),
+        ({"lin_1": ["Biota", 2]}, "lineage entries"),
+    ],
+)
+def test_load_cache_validates_before_modifying_active_cache(tmp_path, payload, message):
+    cache_file = tmp_path / "invalid.pkl"
+    with cache_file.open("wb") as stream:
+        pickle.dump(payload, stream)
+
+    fetch.clear_cache()
+    fetch._taxodist_cache["id_existing"] = "1"
+    with pytest.raises(ValueError, match=message):
+        fetch.load_cache(cache_file)
+    assert fetch._taxodist_cache == {"id_existing": "1"}
