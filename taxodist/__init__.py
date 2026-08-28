@@ -50,7 +50,7 @@ The Netherlands. Retrieved from The Taxonomicon,
 http://taxonomicon.taxonomy.nl.
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 from .fetch import (
     clear_cache, save_cache, load_cache, cache_info,

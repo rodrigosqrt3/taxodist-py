@@ -165,3 +165,23 @@
   and return informative fallback objects instead of failing downstream.
 * `load_cache()` validates cache structure, names, and value types before
   modifying the active cache.
+
+# taxodist 0.7.0
+
+## Performance
+
+* Reused a persistent `requests.Session` across Taxonomicon searches and
+  lineage retrievals. This enables HTTP connection pooling without changing
+  resolution, parsing, caching, timeout, or public API behavior.
+* Added a numeric-only pairwise path for `distance_matrix()`, avoiding one
+  detailed result dictionary allocation per taxon pair.
+* Cached final name-resolved lineages so warm matrix construction no longer
+  repeats name filtering and regular-expression work.
+
+## Compatibility and validation
+
+* Preserved public return types and the continuous-prefix MRCA distance
+  semantics shared with R and Julia.
+* Added regression tests for valid and invalid resolved-lineage caches, quiet
+  search paths, structured HTML edge cases, and optimized matrix construction.
+* The test suite now reports complete statement and branch coverage.

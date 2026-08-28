@@ -193,7 +193,7 @@
     "source": "The Taxonomicon",
     "source_url": "http://taxonomicon.taxonomy.nl",
     "generated_on": "2026-08-06",
-    "package_version": "0.6.0",
+    "package_version": "0.7.0",
     "distance_definition": "0 for identical nodes; otherwise 1 / depth(MRCA)"
   }
 }

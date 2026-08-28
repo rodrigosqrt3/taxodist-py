@@ -74,6 +74,6 @@ def load_taxobase():
         "source_url": "http://taxonomicon.taxonomy.nl",
         "generated_on": None,
         "package_version": "legacy",
-        "distance_definition": "legacy packaged data; rebuild for taxodist 0.6.0"
+        "distance_definition": "legacy packaged data; rebuild for taxodist 0.7.0"
     })
     return data

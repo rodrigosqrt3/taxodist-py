@@ -14,7 +14,7 @@ import taxodist.utils as utils
 import taxodist
 import taxodist.data as data_module
 
-from taxodist.distance import _compute_distance, focal_distances
+from taxodist.distance import _compute_distance, _distance_value, focal_distances
 from taxodist.fetch import (
     clear_cache, save_cache, load_cache, 
     get_taxonomicon_id, get_lineage_by_id, get_lineage,
@@ -27,6 +27,13 @@ from taxodist.data import load_taxobase
 
 def test_taxodist_package_loads():
     assert True
+
+
+def test_fetch_uses_one_persistent_http_session():
+    assert isinstance(fetch._http_session, requests.Session)
+    assert fetch._http_session.headers["User-Agent"] == (
+        "taxodist Python package/0.7.0"
+    )
 
 def test_compute_distance_works_correctly():
     lin_a =["Biota", "Animalia", "Chordata", "Dinosauria", "Theropoda", "Tyrannosauridae", "Tyrannosaurus"]
@@ -84,6 +91,33 @@ def test_compute_distance_returns_inf_for_no_shared_ancestor():
     lin_b = ["Fungi", "Ascomycota"]
     result = _compute_distance(lin_a, lin_b)
     assert result["distance"] == float('inf')
+
+
+def test_numeric_distance_path_matches_detailed_results():
+    cases = [
+        (["Biota", "Animalia"], ["Biota", "Animalia"]),
+        (["Biota", "Animalia"], ["Biota", "Animalia", "Taxon"]),
+        (["Biota", "Animalia", "A"], ["Biota", "Plantae", "B"]),
+        (["Biota", "Animalia"], ["Natura", "Mineralia"]),
+    ]
+    for lin_a, lin_b in cases:
+        assert _distance_value(lin_a, lin_b) == _compute_distance(
+            lin_a, lin_b
+        )["distance"]
+
+
+def test_get_lineage_reuses_final_resolved_lineage_cache(capsys):
+    clear_cache()
+    with patch("taxodist.fetch.get_taxonomicon_id", return_value="123"), patch(
+        "taxodist.fetch.get_lineage_by_id",
+        return_value=["Biota", "Animalia", "Alpha"],
+    ) as mocked_lineage:
+        first = get_lineage("Alpha")
+        second = get_lineage("Alpha", verbose=True)
+
+    assert first == second == ["Biota", "Animalia", "Alpha"]
+    mocked_lineage.assert_called_once()
+    assert "Using cached resolved lineage for Alpha" in capsys.readouterr().out
 
 def test_compute_distance_result_has_correct_s3_class():
     lin =["Biota", "Animalia", "Dinosauria", "Tyrannosaurus"]
@@ -290,7 +324,7 @@ def test_print_taxodist_path_runs_without_error_and_returns_invisibly(mock_get_l
 
 # ── Mock tests ────────────────────────────────────────────────────────────────
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_returns_none_on_network_failure(mock_get):
     clear_cache()
     mock_get.side_effect = requests.exceptions.RequestException("Network error")
@@ -298,7 +332,7 @@ def test_get_taxonomicon_id_returns_none_on_network_failure(mock_get):
         result = get_taxonomicon_id("Tyrannosaurus")
     assert result is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_returns_none_on_bad_status(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -308,7 +342,7 @@ def test_get_taxonomicon_id_returns_none_on_bad_status(mock_get):
         result = get_taxonomicon_id("Tyrannosaurus")
     assert result is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_lineage_by_id_returns_none_on_network_failure(mock_get):
     clear_cache()
     mock_get.side_effect = requests.exceptions.RequestException("Network error")
@@ -322,7 +356,7 @@ def test_get_lineage_returns_none_when_id_not_found(mock_get_id):
     result = get_lineage("Fakeosaurus")
     assert result is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_cache_is_used_on_second_call_to_get_taxonomicon_id(mock_get):
     clear_cache()
     fetch._taxodist_cache["id_Tyrannosaurus"] = "50841"
@@ -495,7 +529,7 @@ def test_get_taxonomicon_id_verbose_prints_messages_on_cache_hit():
     get_taxonomicon_id("Carnotaurus", verbose=True)
     assert True
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_verbose_prints_warning_on_network_failure(mock_get):
     clear_cache()
     import requests
@@ -503,7 +537,7 @@ def test_get_taxonomicon_id_verbose_prints_warning_on_network_failure(mock_get):
     with pytest.warns(UserWarning, match="Cannot reach"):
         get_taxonomicon_id("Drosophila", verbose=True)
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_verbose_prints_warning_on_bad_status(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -518,7 +552,7 @@ def test_get_lineage_by_id_verbose_prints_messages_on_cache_hit():
     get_lineage_by_id("99999", verbose=True)
     assert True
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_lineage_by_id_verbose_prints_warning_on_network_failure(mock_get):
     clear_cache()
     import requests
@@ -526,7 +560,7 @@ def test_get_lineage_by_id_verbose_prints_warning_on_network_failure(mock_get):
     get_lineage_by_id("00000", verbose=True)
     assert True
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_lineage_by_id_returns_none_when_lineage_is_empty_after_cleaning(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -536,7 +570,7 @@ def test_get_lineage_by_id_returns_none_when_lineage_is_empty_after_cleaning(moc
     result = get_lineage_by_id("empty_page")
     assert result is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_lineage_by_id_returns_none_on_bad_http_status(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -545,7 +579,7 @@ def test_get_lineage_by_id_returns_none_on_bad_http_status(mock_get):
     result = get_lineage_by_id("99999")
     assert result is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_lineage_by_id_verbose_prints_warning_on_bad_status(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -560,7 +594,7 @@ def test_get_lineage_by_id_cache_hit_with_verbose_prints_message():
     result = get_lineage_by_id("50841", verbose=True)
     assert isinstance(result, list)
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_lineage_by_id_with_clean_false_returns_none_on_network_failure(mock_get):
     clear_cache()
     fetch._taxodist_cache["lin_clean_test"] = None
@@ -654,7 +688,7 @@ from taxodist.utils import plot_taxodist_cluster, plot_taxodist_ord, is_member
 # ── Mais Mocks de HTML e Buscas ───────────────────────────────────────────────
 
 @patch("taxodist.fetch.get_lineage_by_id")
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_skips_astronomical_entries(mock_get, mock_get_lineage_by_id):
     clear_cache()
     mock_resp = Mock()
@@ -677,7 +711,7 @@ def test_get_taxonomicon_id_skips_astronomical_entries(mock_get, mock_get_lineag
     assert result == "12345"
 
 @patch("taxodist.fetch.get_lineage_by_id")
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_skips_row_matching_both_bio_and_astronomical(mock_get, mock_get_lineage_by_id):
     clear_cache()
     mock_resp = Mock()
@@ -699,7 +733,7 @@ def test_get_taxonomicon_id_skips_row_matching_both_bio_and_astronomical(mock_ge
     result = get_taxonomicon_id("Pterodactylus", verbose=True)
     assert result == "42042"
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_returns_none_when_bio_row_has_no_tree_link(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -716,7 +750,7 @@ def test_get_taxonomicon_id_returns_none_when_bio_row_has_no_tree_link(mock_get)
     result = get_taxonomicon_id("Quercus", verbose=True)
     assert result is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_lineage_by_id_parses_html_and_returns_lineage(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -766,7 +800,7 @@ def test_plot_taxodist_ord_runs_without_error(mock_show):
     ord_obj = taxo_ordinate(d)
     assert plot_taxodist_ord(ord_obj) is ord_obj
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_taxo_search_returns_none_on_network_failure_and_bad_status(mock_get):
     clear_cache()
     mock_get.side_effect = requests.exceptions.RequestException("Network error")
@@ -778,7 +812,7 @@ def test_taxo_search_returns_none_on_network_failure_and_bad_status(mock_get):
     mock_get.return_value = mock_resp
     assert taxo_search("Bacteria", verbose=True) is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_taxo_search_returns_none_when_no_matches_are_found(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -792,7 +826,7 @@ def test_taxo_search_returns_none_when_no_matches_are_found(mock_get):
     
     assert taxo_search("EmptyTaxon", verbose=True) is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_taxo_search_parses_html_applies_skips_dedups_and_returns_df(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -1135,7 +1169,7 @@ def test_get_taxonomicon_id_finds_real_id_and_caches_it():
 
 # ── Mocks Avançados de Fetch (Tratamentos de Exceções, Homônimos, Nomes) ──────
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 @patch("taxodist.fetch.get_lineage_by_id")
 def test_get_taxonomicon_id_skips_entry_whose_lineage_has_no_biota(mock_get_lineage, mock_get):
     clear_cache()
@@ -1154,7 +1188,7 @@ def test_get_taxonomicon_id_skips_entry_whose_lineage_has_no_biota(mock_get_line
     result = get_taxonomicon_id("Carnotaurus")
     assert result is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_lineage_by_id_truncates_at_own_id_when_present_in_links(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -1207,7 +1241,7 @@ def test_get_lineage_appends_taxon_name_when_not_found_in_scraped_lineage(mock_g
     result = get_lineage("Carnotaurus")
     assert result[-1] == "Carnotaurus"
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_lineage_by_id_returns_none_when_all_links_are_filtered_out(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -1221,7 +1255,7 @@ def test_get_lineage_by_id_returns_none_when_all_links_are_filtered_out(mock_get
     result = get_lineage_by_id("99999")
     assert result is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_warns_on_multiple_biological_entries(mock_get):
     clear_cache()
     import taxodist.fetch as fetch
@@ -1246,7 +1280,7 @@ def test_get_taxonomicon_id_warns_on_multiple_biological_entries(mock_get):
     with pytest.warns(UserWarning, match="Multiple valid biological entries"):
         get_taxonomicon_id("Nereis")
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_deduplication_preserves_order(mock_get):
     clear_cache()
     mock_resp = Mock()
@@ -1326,7 +1360,7 @@ def test_get_lineage_by_id_returns_none_for_non_numeric_strings():
     assert get_lineage_by_id("123x") is None
     assert get_lineage_by_id("   ") is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_follows_taxonomic_redirects(mock_get):
     clear_cache()
     import taxodist.fetch as fetch
@@ -1348,7 +1382,7 @@ def test_get_taxonomicon_id_follows_taxonomic_redirects(mock_get):
     result = get_taxonomicon_id("Thelyphonida")
     assert result == "16197"
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_skips_rows_with_no_valid_links(mock_get):
     clear_cache()
     import taxodist.fetch as fetch
@@ -1371,7 +1405,7 @@ def test_get_taxonomicon_id_skips_rows_with_no_valid_links(mock_get):
     result = get_taxonomicon_id("Good taxon")
     assert result == "222"
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_get_taxonomicon_id_skips_valid_links_missing_numeric_ids(mock_get):
     clear_cache()
     import taxodist.fetch as fetch
@@ -1497,7 +1531,7 @@ def test_taxo_ordinate_with_nan_df():
         res = taxo_ordinate(df)
     assert res["points"] is None
 
-@patch("taxodist.fetch.requests.get")
+@patch("taxodist.fetch._http_session.get")
 def test_taxo_search_verbose_prints_on_network_failure(mock_get, capsys):
     import requests
     clear_cache()
@@ -1628,10 +1662,10 @@ def test_load_taxobase_dimensions_are_correct():
     )
     assert len(result["coverage"]) == len(result["taxa"])
 
-# ── Version 0.6.0 behavioral contract ────────────────────────────────────────
+# ── Version 0.7.0 behavioral contract ────────────────────────────────────────
 
-def test_version_and_public_api_match_release_060():
-    assert taxodist.__version__ == "0.6.0"
+def test_version_and_public_api_match_release_070():
+    assert taxodist.__version__ == "0.7.0"
     expected = {
         "cache_info", "check_coverage", "clear_cache", "closest_relative",
         "compare_lineages", "distance_matrix", "filter_clade",
@@ -1835,6 +1869,7 @@ def test_taxobase_loader_supports_legacy_matrix_and_coverage_formats():
         ({"": "invalid"}, "cache keys"),
         ({"id_A": 123}, "taxon ID entries"),
         ({"lin_1": ["Biota", 2]}, "lineage entries"),
+        ({"resolved_lineage_1_A": ["Biota", 2]}, "resolved lineage entries"),
     ],
 )
 def test_load_cache_validates_before_modifying_active_cache(tmp_path, payload, message):
@@ -1847,3 +1882,105 @@ def test_load_cache_validates_before_modifying_active_cache(tmp_path, payload, m
     with pytest.raises(ValueError, match=message):
         fetch.load_cache(cache_file)
     assert fetch._taxodist_cache == {"id_existing": "1"}
+
+
+def test_load_cache_accepts_valid_resolved_lineage_entries(tmp_path):
+    cache_file = tmp_path / "resolved.pkl"
+    payload = {
+        "resolved_lineage_1_Alpha": ["Biota", "Animalia", "Alpha"],
+        "resolved_lineage_0_Alpha": ["Natura", "Biota", "Animalia", "Alpha"],
+        "metadata": {"schema": 1},
+    }
+    with cache_file.open("wb") as stream:
+        pickle.dump(payload, stream)
+
+    fetch.clear_cache()
+    fetch.load_cache(cache_file)
+    assert fetch._taxodist_cache == payload
+
+
+@patch("taxodist.fetch.get_lineage_by_id")
+@patch("taxodist.fetch._http_session.get")
+def test_get_taxonomicon_id_handles_candidate_disappearing_during_disambiguation(
+    mock_get, mock_get_lineage_by_id
+):
+    fetch.clear_cache()
+    response = Mock(status_code=200)
+    response.text = """
+    <table>
+      <tr><td>Alpha animal one</td><td><a class="Valid" href="TaxonTree.aspx?id=10">tree</a></td></tr>
+      <tr><td>Alpha animal two</td><td><a class="Valid" href="TaxonTree.aspx?id=20">tree</a></td></tr>
+    </table>
+    """
+    mock_get.return_value = response
+    calls = {"10": 0, "20": 0}
+
+    def lineage(identifier, **kwargs):
+        calls[identifier] += 1
+        if identifier == "10" and calls[identifier] > 1:
+            return None
+        return ["Biota", "Animalia", "Alpha"]
+
+    mock_get_lineage_by_id.side_effect = lineage
+    assert fetch.get_taxonomicon_id("Alpha") == "20"
+
+
+@patch("taxodist.fetch._http_session.get")
+def test_get_lineage_by_id_parses_content_without_natura_prefix(mock_get):
+    fetch.clear_cache()
+    response = Mock(status_code=200)
+    response.text = """
+    <div id="ctl00_divSubject"><b>Alpha</b></div>
+    <div id="divPageContent">
+      Clade Biota
+      Kingdom Animalia
+      Genus Alpha
+    </div>
+    """
+    mock_get.return_value = response
+    assert fetch.get_lineage_by_id("20") == ["Biota", "Animalia", "Alpha"]
+
+
+@patch("taxodist.fetch._http_session.get")
+def test_taxo_search_quietly_handles_all_outcomes(mock_get):
+    fetch.clear_cache()
+
+    mock_get.return_value = Mock(status_code=503)
+    assert fetch.taxo_search("Alpha", verbose=False) is None
+
+    mock_get.side_effect = requests.exceptions.RequestException("offline")
+    assert fetch.taxo_search("Alpha", verbose=False) is None
+
+    mock_get.side_effect = None
+    mock_get.return_value = Mock(status_code=200, text="<table><tr><td>empty</td></tr></table>")
+    assert fetch.taxo_search("Alpha", verbose=False) is None
+
+    mock_get.return_value = Mock(
+        status_code=200,
+        text='''<table><tr><td><a class="Valid" href="TaxonTree.aspx?id=20">Alpha</a></td></tr></table>''',
+    )
+    result = fetch.taxo_search("Alpha", verbose=False)
+    assert result.to_dict("records") == [{"id": "20", "name": "Alpha"}]
+
+
+@patch("taxodist.utils.get_lineage")
+def test_compare_lineages_handles_taxon_b_as_the_mrca(mock_get_lineage):
+    lineages = {
+        "Alpha": ["Biota", "Animalia", "Alpha"],
+        "Animalia": ["Biota", "Animalia"],
+    }
+
+    def fake_get_lineage(taxon, **kwargs):
+        return lineages.get(taxon)
+
+    mock_get_lineage.side_effect = fake_get_lineage
+    result = compare_lineages("Alpha", "Animalia")
+    assert result["mrca_depth"] == 2
+
+
+@patch("matplotlib.pyplot.show")
+def test_plot_taxodist_ord_accepts_explicit_labels(mock_show):
+    points = pd.DataFrame({"PC1": [0.1, -0.1], "PC2": [0.0, 0.0]}, index=["A", "B"])
+    result = {"points": points, "GOF": [1.0]}
+    assert plot_taxodist_ord(result, labels=["first", "second"]) is result
+    mock_show.assert_called_once()

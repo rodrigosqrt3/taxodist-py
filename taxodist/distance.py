@@ -7,6 +7,26 @@ from scipy.spatial.distance import squareform
 
 from .fetch import get_lineage, get_taxonomicon_id
 
+def _common_prefix_depth(lin_a, lin_b):
+    """Return the length of the continuous common prefix."""
+    depth = 0
+    for node_a, node_b in zip(lin_a, lin_b):
+        if node_a != node_b:
+            break
+        depth += 1
+    return depth
+
+
+def _distance_value(lin_a, lin_b):
+    """Numeric-only hierarchy distance used by matrix construction."""
+    mrca_depth = _common_prefix_depth(lin_a, lin_b)
+    if mrca_depth == 0:
+        return float("inf")
+    if len(lin_a) == len(lin_b) == mrca_depth:
+        return 0.0
+    return 1.0 / mrca_depth
+
+
 def _compute_distance(lin_a, lin_b, name_a="A", name_b="B"):
     """
     Internal helper to compute distance between two parsed lineages.
@@ -17,11 +37,7 @@ def _compute_distance(lin_a, lin_b, name_a="A", name_b="B"):
 
     # Shared ancestry is the continuous common prefix from the root. A name
     # repeated after divergence is a homonym, not a shared hierarchy node.
-    mrca_depth = 0
-    for node_a, node_b in zip(lin_a, lin_b):
-        if node_a != node_b:
-            break
-        mrca_depth += 1
+    mrca_depth = _common_prefix_depth(lin_a, lin_b)
 
     if mrca_depth == 0:
         return {
@@ -35,7 +51,7 @@ def _compute_distance(lin_a, lin_b, name_a="A", name_b="B"):
         }
 
     mrca_name = lin_a[mrca_depth - 1]
-    same_lineage = list(lin_a) == list(lin_b)
+    same_lineage = depth_a == depth_b == mrca_depth
     distance = 0.0 if same_lineage else 1.0 / mrca_depth
 
     return {
@@ -170,9 +186,9 @@ def distance_matrix(taxa, verbose=False, progress=True):
     for i in range(n - 1):
         for j in range(i + 1, n):
             if lineages[i] is not None and lineages[j] is not None:
-                result = _compute_distance(lineages[i], lineages[j], taxa[i], taxa[j])
-                mat[i, j] = result["distance"]
-                mat[j, i] = result["distance"]
+                value = _distance_value(lineages[i], lineages[j])
+                mat[i, j] = value
+                mat[j, i] = value
 
     if progress:
         print("Done.")

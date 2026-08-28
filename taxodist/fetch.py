@@ -9,6 +9,13 @@ import pandas as pd
 
 _taxodist_cache = {}
 
+# Keep one HTTP client for the lifetime of the Python process.  Top-level
+# requests.get() creates a short-lived Session for every call, whereas a
+# persistent Session reuses the connection pool for the many requests made by
+# name resolution and lineage retrieval.
+_http_session = requests.Session()
+_http_session.headers.update({"User-Agent": "taxodist Python package/0.7.0"})
+
 _RANK_PREFIXES = (
     "Clade|Kingdom|Phylum|Superphylum|Subphylum|Infraphylum|Class|Order|"
     "Suborder|Infraorder|Parvorder|Grandorder|Magnorder|Cohort|Subcohort|"
@@ -138,6 +145,13 @@ def load_cache(file):
                 raise ValueError(
                     "Invalid cache file: lineage entries must be sequences of strings."
                 )
+        elif key.startswith("resolved_lineage_"):
+            if not isinstance(value, (list, tuple)) or not all(
+                isinstance(node, str) for node in value
+            ):
+                raise ValueError(
+                    "Invalid cache file: resolved lineage entries must be sequences of strings."
+                )
 
     # Modify the active cache only after the complete file has been validated.
     _taxodist_cache.update(data)
@@ -232,10 +246,8 @@ def get_taxonomicon_id(taxon, verbose=False):
 
     safe_taxon = urllib.parse.quote(str(taxon))
     url = f"http://taxonomicon.taxonomy.nl/TaxonList.aspx?subject=Entity&by=ScientificName&search={safe_taxon}"
-    headers = {"User-Agent": "taxodist Python package/0.6.0"}
-
     try:
-        res = requests.get(url, headers=headers, timeout=30)
+        res = _http_session.get(url, timeout=30)
         if res.status_code != 200:
             warnings.warn(
                 "Cannot reach The Taxonomicon server.\n"
@@ -381,10 +393,8 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
         return _taxodist_cache[cache_key]
 
     url = f"http://taxonomicon.taxonomy.nl/TaxonTree.aspx?id={taxon_id}&src=0"
-    headers = {"User-Agent": "taxodist Python package/0.6.0"}
-
     try:
-        res = requests.get(url, headers=headers, timeout=30)
+        res = _http_session.get(url, timeout=30)
         if res.status_code != 200:
             if verbose:
                 print(f"Could not retrieve lineage for ID {taxon_id}")
@@ -500,6 +510,12 @@ def get_lineage(taxon, clean=True, verbose=False):
     taxon_str = str(taxon)
     is_id = bool(re.match(r"^[0-9]+$", taxon_str))
 
+    resolved_key = f"resolved_lineage_{int(bool(clean))}_{taxon_str}"
+    if not is_id and resolved_key in _taxodist_cache:
+        if verbose:
+            print(f"Using cached resolved lineage for {taxon_str}")
+        return list(_taxodist_cache[resolved_key])
+
     if is_id:
         id_val = taxon_str
     else:
@@ -534,6 +550,9 @@ def get_lineage(taxon, clean=True, verbose=False):
     if not lineage:
         return None
 
+    if not is_id:
+        _taxodist_cache[resolved_key] = list(lineage)
+
     return lineage
 
 
@@ -566,10 +585,8 @@ def taxo_search(taxon, verbose=False):
 
     safe_taxon = urllib.parse.quote(str(taxon))
     url = f"http://taxonomicon.taxonomy.nl/TaxonList.aspx?subject=Entity&by=ScientificName&search={safe_taxon}"
-    headers = {"User-Agent": "taxodist Python package/0.6.0"}
-
     try:  
-        res = requests.get(url, headers=headers, timeout=30)
+        res = _http_session.get(url, timeout=30)
         if res.status_code != 200:
             if verbose:
                 print("Could not reach Taxonomicon")

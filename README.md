@@ -97,7 +97,7 @@ be passed directly to the clustering, ordination, and plotting helpers.
 ## Reproducible reference data
 
 `load_taxobase()` loads the packaged offline reference object. For release
-0.6.0 it is exported from the same `taxobase` object distributed with the R
+0.7.0 it is exported from the same `taxobase` object distributed with the R
 package, preserving taxon order, matrices, examples, and provenance metadata
 across both implementations.
 
