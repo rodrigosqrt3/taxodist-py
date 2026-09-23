@@ -710,6 +710,9 @@ class TaxodistResolution(pd.DataFrame):
 
 def _make_resolution(rows, source, source_url, retrieved_at=None):
     frame = TaxodistResolution(rows, columns=RESOLUTION_COLUMNS)
+    for column in ("input", "resolved_name", "id", "status"):
+        frame[column] = frame[column].astype("object")
+        frame.loc[frame[column].isna(), column] = None
     frame["n_candidates"] = frame["n_candidates"].astype("int64")
     frame["lineage_depth"] = pd.array(frame["lineage_depth"], dtype="Int64")
     frame.source = source

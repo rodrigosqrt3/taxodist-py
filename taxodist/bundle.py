@@ -128,13 +128,15 @@ def validate_taxodist_bundle(bundle):
             if pd.isna(depth) or len(lineage) != int(depth):
                 raise ValueError(f"Invalid bundle: lineage depth mismatch at row {number}")
 
+        id_missing = pd.isna(row["id"])
+        name_missing = pd.isna(row["resolved_name"])
         if row["status"] in {"resolved", "ambiguous"}:
-            if row["id"] is None or lineage is None or candidates.empty:
+            if id_missing or lineage is None or candidates.empty:
                 raise ValueError(f"Invalid bundle: incomplete resolved record at row {number}")
             if str(candidates.iloc[0]["id"]) != row["id"]:
                 raise ValueError(f"Invalid bundle: selected candidate mismatch at row {number}")
         else:
-            if row["id"] is not None or lineage is not None or row["resolved_name"] is not None:
+            if not id_missing or lineage is not None or not name_missing:
                 raise ValueError(f"Invalid bundle: incomplete unresolved record at row {number}")
             if row["status"] == "unresolved" and not candidates.empty:
                 raise ValueError(f"Invalid bundle: unresolved record has candidates at row {number}")
@@ -173,8 +175,10 @@ def write_taxodist_bundle(bundle, file, pretty=True):
         records.append(
             {
                 "input": row.input,
-                "resolved_name": row.resolved_name,
-                "id": row.id,
+                "resolved_name": (
+                    None if pd.isna(row.resolved_name) else row.resolved_name
+                ),
+                "id": None if pd.isna(row.id) else row.id,
                 "status": row.status,
                 "n_candidates": int(row.n_candidates),
                 "lineage_depth": (
