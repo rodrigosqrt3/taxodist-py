@@ -185,3 +185,31 @@
 * Added regression tests for valid and invalid resolved-lineage caches, quiet
   search paths, structured HTML edge cases, and optimized matrix construction.
 * The test suite now reports complete statement and branch coverage.
+
+# taxodist 0.8.0
+
+## Auditable name resolution
+
+* Added `taxo_resolve()` with explicit `resolved`, `ambiguous`, `unresolved`,
+  and `retrieval_error` statuses, candidate tables, selected IDs, lineages,
+  and lineage depths.
+* Added explicit `warn`, `first`, and `error` ambiguity policies and direct
+  numeric-ID resolution.
+* Added `taxo_from_lineages()` for curated, frozen, unpublished, or fully
+  offline classifications.
+* `distance_matrix()` now accepts `TaxodistResolution` objects and reuses their
+  stored lineages without network requests.
+
+## Portable analysis bundles
+
+* Added `TaxodistBundle`, `taxo_bundle()`, `write_taxodist_bundle()`, and
+  `read_taxodist_bundle()` using the same version 1.0 JSON schema as R.
+* Bundles preserve resolution records, candidate decisions, lineages,
+  distances, metric definition, software metadata, and source provenance.
+* Missing distances use JSON `null`; disconnected distances use the explicit
+  strings `"Infinity"` and `"-Infinity"`.
+* Bundle validation checks fields, statuses, candidate counts, lineage depths,
+  selected candidates, matrix labels, symmetry, and agreement between stored
+  matrices and stored lineages.
+* `distance_matrix()` accepts a validated bundle and returns its stored matrix
+  without retrieval or recomputation.

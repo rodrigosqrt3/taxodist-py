@@ -20,7 +20,9 @@ pip install git+https://github.com/rodrigosqrt3/taxodist-py.git
 ```python
 from taxodist import (
     get_lineage, taxo_distance, mrca, distance_matrix,
-    filter_clade, taxo_path, save_cache, load_cache
+    filter_clade, taxo_path, save_cache, load_cache,
+    taxo_resolve, taxo_from_lineages, taxo_bundle,
+    write_taxodist_bundle, read_taxodist_bundle
 )
 
 # Get a full lineage
@@ -47,6 +49,42 @@ taxo_path("Tyrannosaurus", "Velociraptor")
 # Save and restore the lineage cache across sessions
 save_cache("my_cache.pkl")
 load_cache("my_cache.pkl")
+```
+
+## Auditable resolution and portable bundles
+
+Release 0.8.0 can resolve a complete input list before an analysis, preserving
+the candidates considered, selected ID, lineage, lineage depth, and one of the
+statuses `resolved`, `ambiguous`, `unresolved`, or `retrieval_error`:
+
+```python
+resolved = taxo_resolve(
+    ["Tyrannosaurus", "Nereis", "50841"],
+    ambiguity="warn",
+)
+distances = distance_matrix(resolved)
+```
+
+Curated or unpublished classifications use the same downstream API without
+network access:
+
+```python
+resolved = taxo_from_lineages({
+    "Alpha": ["Biota", "Animalia", "Alpha"],
+    "Beta": ["Biota", "Animalia", "Beta"],
+}, source="Curated study")
+```
+
+A bundle combines the audit table, matrix, metric definition, software
+metadata, and source provenance. Its schema is shared with the R and Julia
+implementations; missing distances are JSON `null` and disconnected distances
+are encoded as `"Infinity"` or `"-Infinity"`.
+
+```python
+bundle = taxo_bundle(resolved)
+write_taxodist_bundle(bundle, "analysis.taxodist.json")
+restored = read_taxodist_bundle("analysis.taxodist.json")
+distance_matrix(restored)
 ```
 
 ## The distance metric
@@ -97,7 +135,7 @@ be passed directly to the clustering, ordination, and plotting helpers.
 ## Reproducible reference data
 
 `load_taxobase()` loads the packaged offline reference object. For release
-0.7.0 it is exported from the same `taxobase` object distributed with the R
+0.8.0 it is exported from the same `taxobase` object distributed with the R
 package, preserving taxon order, matrices, examples, and provenance metadata
 across both implementations.
 

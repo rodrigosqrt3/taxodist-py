@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taxodist"
-version = "0.7.0"
+version = "0.8.0"
 authors =[
   { name="Rodrigo Fonseca Villa", email="rodrigo03.villa@gmail.com" }
 ]
@@ -52,7 +52,7 @@ dev = [
 ]
 
 [tool.setuptools.package-data]
-taxodist = ["data/*.json"]
+taxodist = ["data/*.json", "schema/*.json"]
 
 [tool.setuptools.packages.find]
 include = ["taxodist", "taxodist.*"]
