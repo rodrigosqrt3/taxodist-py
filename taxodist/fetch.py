@@ -3,6 +3,8 @@ import re
 import pickle
 import urllib.parse
 import warnings
+from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -14,7 +16,7 @@ _taxodist_cache = {}
 # persistent Session reuses the connection pool for the many requests made by
 # name resolution and lineage retrieval.
 _http_session = requests.Session()
-_http_session.headers.update({"User-Agent": "taxodist Python package/0.7.0"})
+_http_session.headers.update({"User-Agent": "taxodist Python package/0.8.0"})
 
 _RANK_PREFIXES = (
     "Clade|Kingdom|Phylum|Superphylum|Subphylum|Infraphylum|Class|Order|"
@@ -263,7 +265,11 @@ def get_taxonomicon_id(taxon, verbose=False):
         )
         return None
 
-    soup = BeautifulSoup(res.text, "lxml")
+    try:
+        soup = BeautifulSoup(res.text, "lxml")
+    except Exception:
+        warnings.warn("Could not parse the response from The Taxonomicon.")
+        return None
     rows = soup.find_all("tr")
     bio_ids =[]
 
@@ -404,7 +410,12 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
             print(f"Could not retrieve lineage for ID {taxon_id}")
         return None
 
-    soup = BeautifulSoup(res.text, "lxml")
+    try:
+        soup = BeautifulSoup(res.text, "lxml")
+    except Exception:
+        if verbose:
+            print(f"Could not parse lineage for ID {taxon_id}")
+        return None
     subject_node = soup.select_one("#ctl00_divSubject b")
     content_node = soup.select_one("#divPageContent")
     
@@ -556,6 +567,75 @@ def get_lineage(taxon, clean=True, verbose=False):
     return lineage
 
 
+def _taxo_search_details(taxon, verbose=False):
+    """Return a structured Taxonomicon search result for internal callers."""
+    if verbose:
+        print(f"Searching Taxonomicon for '{taxon}'...")
+
+    safe_taxon = urllib.parse.quote(str(taxon))
+    url = (
+        "http://taxonomicon.taxonomy.nl/TaxonList.aspx"
+        f"?subject=Entity&by=ScientificName&search={safe_taxon}"
+    )
+    try:
+        res = _http_session.get(url, timeout=30)
+        if res.status_code != 200:
+            if verbose:
+                print("Could not reach Taxonomicon")
+            return {"status": "retrieval_error", "results": None}
+    except requests.exceptions.RequestException:
+        if verbose:
+            print("Could not reach Taxonomicon")
+        return {"status": "retrieval_error", "results": None}
+
+    try:
+        soup = BeautifulSoup(res.text, "lxml")
+        rows = soup.find_all("tr")
+    except Exception:
+        if verbose:
+            print("Could not parse the Taxonomicon response")
+        return {"status": "retrieval_error", "results": None}
+
+    results = []
+    for row in rows:
+        text = row.get_text(separator=" ", strip=True)
+        if re.search(
+            r"\bastronomical\b|\bplanet\b|\bMinor planet\b|\bcomet\b|"
+            r"\bastronomy\b|\basteroid\b",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            continue
+
+        links = row.find_all("a", href=re.compile(r"TaxonTree"))
+        valid_links = [a for a in links if "Valid" in a.get("class", [])]
+        if not valid_links:
+            continue
+
+        match = re.search(r"id=([0-9]+)", valid_links[0].get("href", ""))
+        if not match:
+            continue
+
+        text_entry = re.sub(r"\s+", " ", text).strip()
+        text_entry = re.sub(
+            r"^N\s*\|\s*T\s*\|\s*P\s*\|\s*R\s*\|\s*B\s*\|\s*L\s*",
+            "",
+            text_entry,
+            count=1,
+        )
+        results.append({"id": match.group(1), "name": text_entry})
+
+    if not results:
+        if verbose:
+            print("No matches found.")
+        return {"status": "not_found", "results": None}
+
+    frame = pd.DataFrame(results).drop_duplicates(subset=["id"]).reset_index(drop=True)
+    if verbose:
+        print(f"Found {len(frame)} entries.")
+    return {"status": "ok", "results": frame}
+
+
 def taxo_search(taxon, verbose=False):
     """
     Search The Taxonomicon for a taxon name
@@ -580,62 +660,264 @@ def taxo_search(taxon, verbose=False):
         - name: Character. The full taxon description, including rank and author.
         Returns None if no matches are found.
     """
-    if verbose:
-        print(f"Searching Taxonomicon for '{taxon}'...")
+    return _taxo_search_details(taxon, verbose=verbose)["results"]
 
-    safe_taxon = urllib.parse.quote(str(taxon))
-    url = f"http://taxonomicon.taxonomy.nl/TaxonList.aspx?subject=Entity&by=ScientificName&search={safe_taxon}"
-    try:  
-        res = _http_session.get(url, timeout=30)
-        if res.status_code != 200:
-            if verbose:
-                print("Could not reach Taxonomicon")
-            return None
-    except requests.exceptions.RequestException:
-        if verbose:
-            print("Could not reach Taxonomicon")
-        return None
 
-    soup = BeautifulSoup(res.text, "lxml")
-    rows = soup.find_all("tr")
+RESOLUTION_COLUMNS = [
+    "input",
+    "resolved_name",
+    "id",
+    "status",
+    "n_candidates",
+    "lineage_depth",
+    "lineage",
+    "candidates",
+]
 
-    results =[]
-    for row in rows:
-        text = row.get_text(separator=" ", strip=True)
-        if re.search(r"\bastronomical\b|\bplanet\b|\bMinor planet\b|\bcomet\b|\bastronomy\b|\basteroid\b", text, flags=re.IGNORECASE):
-            continue
 
-        links = row.find_all("a", href=re.compile(r"TaxonTree"))
-        if not links:
-            continue
+def _utc_timestamp():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-        valid_links =[a for a in links if "Valid" in a.get("class", [])]
-        if not valid_links:
-            continue
 
-        target_link = valid_links[0]
-        href = target_link.get("href", "")
-        
-        match = re.search(r"id=([0-9]+)", href)
-        if not match:
-            continue
+def _empty_candidates():
+    return pd.DataFrame(
+        {"id": pd.Series(dtype="object"), "name": pd.Series(dtype="object")}
+    )
 
-        id_val = match.group(1)
 
-        text_entry = re.sub(r"\s+", " ", text).strip()
-        text_entry = re.sub(r"^N\s*\|\s*T\s*\|\s*P\s*\|\s*R\s*\|\s*B\s*\|\s*L\s*", "", text_entry, count=1)
+class TaxodistResolution(pd.DataFrame):
+    """A pandas resolution table with source provenance."""
 
-        results.append({"id": id_val, "name": text_entry})
+    _metadata = ["source", "source_url", "retrieved_at"]
+    _taxodist_resolution = True
 
-    if not results:
-        if verbose:
-            print("No matches found.")
-        return None
+    @property
+    def _constructor(self):
+        return TaxodistResolution
 
-    df = pd.DataFrame(results)
-    df = df.drop_duplicates(subset=["id"]).reset_index(drop=True)
+    def summary_counts(self):
+        counts = self["status"].value_counts()
+        return {
+            status: int(counts.get(status, 0))
+            for status in (
+                "resolved",
+                "ambiguous",
+                "unresolved",
+                "retrieval_error",
+            )
+        }
 
-    if verbose:
-        print(f"Found {len(df)} entries.")
-        
-    return df
+
+def _make_resolution(rows, source, source_url, retrieved_at=None):
+    frame = TaxodistResolution(rows, columns=RESOLUTION_COLUMNS)
+    frame["n_candidates"] = frame["n_candidates"].astype("int64")
+    frame["lineage_depth"] = pd.array(frame["lineage_depth"], dtype="Int64")
+    frame.source = source
+    frame.source_url = source_url
+    frame.retrieved_at = retrieved_at or _utc_timestamp()
+    return frame
+
+
+def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True):
+    """Resolve names or numeric Taxonomicon IDs into an auditable table."""
+    if ambiguity not in {"warn", "first", "error"}:
+        raise ValueError("ambiguity must be 'warn', 'first', or 'error'")
+    if isinstance(taxa, (str, bytes, Mapping)) or not isinstance(taxa, Iterable):
+        raise TypeError("taxa must be a sequence of strings")
+    taxa = list(taxa)
+    if any(not isinstance(taxon, str) for taxon in taxa):
+        raise TypeError("taxa must be a sequence of strings")
+    if any(not taxon.strip() for taxon in taxa):
+        raise ValueError("taxa cannot contain missing or empty values")
+
+    def resolve_one(taxon):
+        if re.fullmatch(r"[0-9]+", taxon):
+            lineage = get_lineage_by_id(taxon, clean=True, verbose=verbose)
+            if lineage is None:
+                return {
+                    "input": taxon,
+                    "resolved_name": None,
+                    "id": None,
+                    "status": "retrieval_error",
+                    "n_candidates": 0,
+                    "lineage_depth": None,
+                    "lineage": None,
+                    "candidates": _empty_candidates(),
+                }
+            name = lineage[-1]
+            return {
+                "input": taxon,
+                "resolved_name": name,
+                "id": taxon,
+                "status": "resolved",
+                "n_candidates": 1,
+                "lineage_depth": len(lineage),
+                "lineage": list(lineage),
+                "candidates": pd.DataFrame([{"id": taxon, "name": name}]),
+            }
+
+        search = _taxo_search_details(taxon, verbose=verbose)
+        if search["status"] == "retrieval_error":
+            return {
+                "input": taxon,
+                "resolved_name": None,
+                "id": None,
+                "status": "retrieval_error",
+                "n_candidates": 0,
+                "lineage_depth": None,
+                "lineage": None,
+                "candidates": _empty_candidates(),
+            }
+        candidates = search["results"]
+        if search["status"] == "not_found" or candidates is None or candidates.empty:
+            return {
+                "input": taxon,
+                "resolved_name": None,
+                "id": None,
+                "status": "unresolved",
+                "n_candidates": 0,
+                "lineage_depth": None,
+                "lineage": None,
+                "candidates": _empty_candidates(),
+            }
+
+        searched_candidates = candidates.reset_index(drop=True).copy()
+        candidate_lineages = [
+            get_lineage_by_id(identifier, clean=True, verbose=verbose)
+            for identifier in candidates["id"]
+        ]
+        valid = [
+            lineage is not None and "Biota" in lineage
+            for lineage in candidate_lineages
+        ]
+        candidates = candidates.loc[valid].reset_index(drop=True)
+        candidate_lineages = [
+            lineage for lineage, keep in zip(candidate_lineages, valid) if keep
+        ]
+        if candidates.empty:
+            return {
+                "input": taxon,
+                "resolved_name": None,
+                "id": None,
+                "status": "retrieval_error",
+                "n_candidates": len(searched_candidates),
+                "lineage_depth": None,
+                "lineage": None,
+                "candidates": searched_candidates,
+            }
+
+        if len(candidates) > 1:
+            pattern = re.compile(rf"\b{re.escape(taxon)}\b", re.IGNORECASE)
+            exact = [
+                any(pattern.search(node) for node in lineage)
+                for lineage in candidate_lineages
+            ]
+            if any(exact):
+                candidates = candidates.loc[exact].reset_index(drop=True)
+                candidate_lineages = [
+                    lineage
+                    for lineage, keep in zip(candidate_lineages, exact)
+                    if keep
+                ]
+
+        selected_lineage = list(candidate_lineages[0])
+        return {
+            "input": taxon,
+            "resolved_name": selected_lineage[-1],
+            "id": str(candidates.iloc[0]["id"]),
+            "status": "ambiguous" if len(candidates) > 1 else "resolved",
+            "n_candidates": len(candidates),
+            "lineage_depth": len(selected_lineage),
+            "lineage": selected_lineage,
+            "candidates": candidates.copy(),
+        }
+
+    unique_taxa = list(dict.fromkeys(taxa))
+    resolved_unique = {}
+    for index, taxon in enumerate(unique_taxa, start=1):
+        resolved_unique[taxon] = resolve_one(taxon)
+        if progress:
+            print(f"Resolving taxa [{index}/{len(unique_taxa)}]: {taxon}")
+
+    result = _make_resolution(
+        [resolved_unique[taxon].copy() for taxon in taxa],
+        source="The Taxonomicon",
+        source_url="http://taxonomicon.taxonomy.nl",
+    )
+    ambiguous = result.loc[result["status"] == "ambiguous"]
+    if not ambiguous.empty:
+        details = ", ".join(
+            f"{row.input} ({row.n_candidates} candidates)"
+            for row in ambiguous.itertuples()
+        )
+        message = (
+            "Ambiguous taxon names were resolved using the first candidate: "
+            f"{details}. Inspect taxo_search() or pass numeric IDs explicitly."
+        )
+        if ambiguity == "error":
+            raise ValueError(message)
+        if ambiguity == "warn":
+            warnings.warn(message, UserWarning, stacklevel=2)
+    return result
+
+
+def taxo_from_lineages(lineages, ids=None, source="user-supplied"):
+    """Create an auditable offline resolution from root-to-tip lineages."""
+    if not isinstance(lineages, dict):
+        raise TypeError("lineages must be a dictionary with unique, non-empty names")
+    labels = list(lineages)
+    if any(not isinstance(label, str) or not label.strip() for label in labels):
+        raise ValueError("lineages must have unique, non-empty names")
+    if any(
+        not isinstance(lineage, (list, tuple))
+        or not lineage
+        or any(not isinstance(node, str) or not node.strip() for node in lineage)
+        for lineage in lineages.values()
+    ):
+        raise ValueError(
+            "Every lineage must be a non-empty sequence without missing or empty nodes"
+        )
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("source must be one non-empty string")
+
+    if ids is None:
+        identifiers = [f"custom:{label}" for label in labels]
+    elif isinstance(ids, dict):
+        if not all(label in ids for label in labels):
+            raise ValueError("Named ids must contain every lineage name")
+        identifiers = [ids[label] for label in labels]
+    elif isinstance(ids, Iterable) and not isinstance(ids, (str, bytes)):
+        identifiers = list(ids)
+    else:
+        raise TypeError("ids must be a sequence or dictionary of strings")
+    if (
+        len(identifiers) != len(labels)
+        or any(
+            not isinstance(identifier, str) or not identifier.strip()
+            for identifier in identifiers
+        )
+        or len(set(identifiers)) != len(identifiers)
+    ):
+        raise ValueError(
+            "ids must contain one unique, non-empty identifier per lineage"
+        )
+
+    rows = []
+    for label, identifier in zip(labels, identifiers):
+        lineage = list(lineages[label])
+        resolved_name = lineage[-1]
+        rows.append(
+            {
+                "input": label,
+                "resolved_name": resolved_name,
+                "id": identifier,
+                "status": "resolved",
+                "n_candidates": 1,
+                "lineage_depth": len(lineage),
+                "lineage": lineage,
+                "candidates": pd.DataFrame(
+                    [{"id": identifier, "name": resolved_name}]
+                ),
+            }
+        )
+    return _make_resolution(rows, source=source, source_url=None)

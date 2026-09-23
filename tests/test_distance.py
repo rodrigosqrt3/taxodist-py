@@ -1,4 +1,5 @@
 import math
+import json
 import os
 import pickle
 import tempfile
@@ -22,6 +23,12 @@ from taxodist.fetch import (
 )
 from taxodist.utils import filter_clade, taxo_path, print_taxodist_path
 from taxodist.data import load_taxobase
+from taxodist.bundle import (
+    TaxodistBundle,
+    _parse_matrix,
+    validate_taxodist_bundle,
+)
+from taxodist.fetch import _taxo_search_details, TaxodistResolution
 
 # ── Pure logic tests ──────────────────────────────────────────────────────────
 
@@ -32,7 +39,7 @@ def test_taxodist_package_loads():
 def test_fetch_uses_one_persistent_http_session():
     assert isinstance(fetch._http_session, requests.Session)
     assert fetch._http_session.headers["User-Agent"] == (
-        "taxodist Python package/0.7.0"
+        "taxodist Python package/0.8.0"
     )
 
 def test_compute_distance_works_correctly():
@@ -1662,10 +1669,10 @@ def test_load_taxobase_dimensions_are_correct():
     )
     assert len(result["coverage"]) == len(result["taxa"])
 
-# ── Version 0.7.0 behavioral contract ────────────────────────────────────────
+# ── Version 0.8.0 behavioral contract ────────────────────────────────────────
 
-def test_version_and_public_api_match_release_070():
-    assert taxodist.__version__ == "0.7.0"
+def test_version_and_public_api_match_release_080():
+    assert taxodist.__version__ == "0.8.0"
     expected = {
         "cache_info", "check_coverage", "clear_cache", "closest_relative",
         "compare_lineages", "distance_matrix", "filter_clade",
@@ -1673,7 +1680,9 @@ def test_version_and_public_api_match_release_070():
         "get_taxonomicon_id", "is_member", "lineage_depth", "load_cache",
         "load_taxobase", "mrca", "save_cache", "shared_clades",
         "taxo_cluster", "taxo_distance", "taxo_heatmap", "taxo_ordinate",
-        "taxo_path", "taxo_search"
+        "taxo_path", "taxo_search", "taxo_resolve", "taxo_from_lineages",
+        "taxo_bundle", "validate_taxodist_bundle",
+        "write_taxodist_bundle", "read_taxodist_bundle"
     }
     assert all(callable(getattr(taxodist, name, None)) for name in expected)
 
@@ -1984,3 +1993,429 @@ def test_plot_taxodist_ord_accepts_explicit_labels(mock_show):
     result = {"points": points, "GOF": [1.0]}
     assert plot_taxodist_ord(result, labels=["first", "second"]) is result
     mock_show.assert_called_once()
+
+
+# ── Version 0.8.0 auditable resolution and portable bundles ─────────────────
+def _candidates(*pairs):
+    return pd.DataFrame(pairs, columns=["id", "name"])
+
+
+def _offline_resolution():
+    return taxodist.taxo_from_lineages(
+        {
+            "Alpha": ["Biota", "Animalia", "Alpha"],
+            "Beta": ["Biota", "Animalia", "Beta"],
+        },
+        source="Curated study",
+    )
+
+
+def test_public_version_and_v080_api():
+    assert taxodist.__version__ == "0.8.0"
+    assert taxodist.fetch._http_session.headers["User-Agent"].endswith("/0.8.0")
+    for name in (
+        "TaxodistResolution",
+        "taxo_resolve",
+        "taxo_from_lineages",
+        "TaxodistBundle",
+        "taxo_bundle",
+        "validate_taxodist_bundle",
+        "write_taxodist_bundle",
+        "read_taxodist_bundle",
+    ):
+        assert hasattr(taxodist, name)
+
+    built_with = taxodist.load_taxobase()["metadata"]["package_version"]
+    assert tuple(map(int, built_with.split("."))) <= tuple(
+        map(int, taxodist.__version__.split("."))
+    )
+
+
+def test_structured_search_distinguishes_failure_parse_absence_and_success():
+    response = type("Response", (), {"status_code": 500, "text": ""})()
+    with patch("taxodist.fetch._http_session.get", return_value=response):
+        assert _taxo_search_details("Alpha", verbose=True)["status"] == "retrieval_error"
+    with patch(
+        "taxodist.fetch._http_session.get",
+        side_effect=requests.exceptions.RequestException,
+    ):
+        assert _taxo_search_details("Alpha", verbose=True)["status"] == "retrieval_error"
+
+    response.status_code = 200
+    with patch("taxodist.fetch._http_session.get", return_value=response), patch(
+        "taxodist.fetch.BeautifulSoup", side_effect=ValueError("bad html")
+    ):
+        assert _taxo_search_details("Alpha", verbose=True)["status"] == "retrieval_error"
+
+    response.text = "<html><table><tr><td>nothing</td></tr></table></html>"
+    with patch("taxodist.fetch._http_session.get", return_value=response):
+        assert _taxo_search_details("Alpha", verbose=True)["status"] == "not_found"
+
+    response.text = """
+      <table>
+        <tr><td>planet Alpha</td><td><a class='Valid' href='TaxonTree.aspx?id=9'>x</a></td></tr>
+        <tr><td>bad</td><td><a class='Invalid' href='TaxonTree.aspx?id=8'>x</a></td></tr>
+        <tr><td>missing</td><td><a class='Valid' href='TaxonTree.aspx?x=1'>x</a></td></tr>
+        <tr><td>N | T | P | R | B | L Alpha animal</td><td><a class='Valid' href='TaxonTree.aspx?id=1'>x</a></td></tr>
+        <tr><td>Alpha duplicate</td><td><a class='Valid' href='TaxonTree.aspx?id=1'>x</a></td></tr>
+      </table>
+    """
+    with patch("taxodist.fetch._http_session.get", return_value=response):
+        result = _taxo_search_details("Alpha", verbose=True)
+    assert result["status"] == "ok"
+    assert result["results"].to_dict("records") == [
+        {"id": "1", "name": "Alpha animal x"}
+    ]
+
+
+def test_public_fetchers_fail_cleanly_on_parser_errors():
+    response = type("Response", (), {"status_code": 200, "text": "bad"})()
+    with patch("taxodist.fetch._http_session.get", return_value=response), patch(
+        "taxodist.fetch.BeautifulSoup", side_effect=ValueError("bad html")
+    ):
+        with pytest.warns(UserWarning, match="Could not parse"):
+            assert taxodist.get_taxonomicon_id("Alpha") is None
+        assert taxodist.get_lineage_by_id("123", verbose=True) is None
+
+
+def test_taxo_resolve_preserves_all_statuses_candidates_and_duplicates():
+    searches = {
+        "Alpha": {"status": "ok", "results": _candidates(("1", "Alpha"))},
+        "Nereis": {
+            "status": "ok",
+            "results": _candidates(("2", "Nereis one"), ("3", "Nereis two")),
+        },
+        "Missing": {"status": "not_found", "results": None},
+        "Offline": {"status": "retrieval_error", "results": None},
+    }
+    lineages = {
+        "1": ["Biota", "Animalia", "Alpha"],
+        "2": ["Biota", "Animalia", "Nereis"],
+        "3": ["Biota", "Animalia", "Nereis"],
+    }
+    with patch("taxodist.fetch._taxo_search_details", side_effect=lambda x, **_: searches[x]) as search, patch(
+        "taxodist.fetch.get_lineage_by_id", side_effect=lambda x, **_: lineages.get(x)
+    ) as lineage:
+        with pytest.warns(UserWarning, match="Ambiguous taxon names"):
+            result = taxodist.taxo_resolve(
+                ["Alpha", "Nereis", "Missing", "Offline", "Alpha"],
+                progress=True,
+            )
+
+    assert isinstance(result, TaxodistResolution)
+    assert list(result["status"]) == [
+        "resolved",
+        "ambiguous",
+        "unresolved",
+        "retrieval_error",
+        "resolved",
+    ]
+    assert list(result["id"]) == ["1", "2", None, None, "1"]
+    assert list(result["n_candidates"]) == [1, 2, 0, 0, 1]
+    assert result.iloc[1]["candidates"].shape == (2, 2)
+    assert search.call_count == 4
+    assert lineage.call_count == 3
+    assert result.source == "The Taxonomicon"
+    assert result.summary_counts() == {
+        "resolved": 2,
+        "ambiguous": 1,
+        "unresolved": 1,
+        "retrieval_error": 1,
+    }
+
+
+def test_taxo_resolve_numeric_ids_filtering_failure_and_policies():
+    candidates = _candidates(
+        ("1", "unrelated"), ("2", "Alpha accepted"), ("3", "Alpha second")
+    )
+    lineages = {
+        "1": ["Biota", "Animalia", "Other"],
+        "2": ["Biota", "Animalia", "Alpha"],
+        "3": ["Biota", "Plantae", "Alpha"],
+        "99": ["Biota", "Direct"],
+    }
+    with patch(
+        "taxodist.fetch._taxo_search_details",
+        return_value={"status": "ok", "results": candidates},
+    ), patch(
+        "taxodist.fetch.get_lineage_by_id",
+        side_effect=lambda x, **_: lineages.get(x),
+    ):
+        first = taxodist.taxo_resolve(["Alpha"], ambiguity="first", progress=False)
+        assert first.iloc[0]["status"] == "ambiguous"
+        assert first.iloc[0]["id"] == "2"
+        with pytest.raises(ValueError, match="Ambiguous taxon names"):
+            taxodist.taxo_resolve(["Alpha"], ambiguity="error", progress=False)
+        direct = taxodist.taxo_resolve(["99"], progress=False)
+        failed = taxodist.taxo_resolve(["404"], progress=False)
+
+    assert direct.iloc[0]["resolved_name"] == "Direct"
+    assert direct.iloc[0]["n_candidates"] == 1
+    assert failed.iloc[0]["status"] == "retrieval_error"
+
+    with patch(
+        "taxodist.fetch._taxo_search_details",
+        return_value={"status": "ok", "results": candidates},
+    ), patch("taxodist.fetch.get_lineage_by_id", return_value=None):
+        unavailable = taxodist.taxo_resolve(["Alpha"], progress=False)
+    assert unavailable.iloc[0]["status"] == "retrieval_error"
+    assert unavailable.iloc[0]["n_candidates"] == 3
+    assert unavailable.iloc[0]["candidates"].equals(candidates)
+
+
+@pytest.mark.parametrize(
+    "taxa, ambiguity, error",
+    [
+        ("Alpha", "warn", TypeError),
+        (1, "warn", TypeError),
+        ([1], "warn", TypeError),
+        ([""], "warn", ValueError),
+        (["Alpha"], "guess", ValueError),
+    ],
+)
+def test_taxo_resolve_validates_inputs(taxa, ambiguity, error):
+    with pytest.raises(error):
+        taxodist.taxo_resolve(taxa, ambiguity=ambiguity, progress=False)
+
+
+def test_taxo_from_lineages_builds_offline_resolution_and_validates():
+    resolution = _offline_resolution()
+    assert isinstance(resolution, TaxodistResolution)
+    assert list(resolution["id"]) == ["custom:Alpha", "custom:Beta"]
+    assert list(resolution["lineage_depth"].astype(int)) == [3, 3]
+    assert resolution.source == "Curated study"
+    assert resolution.source_url is None
+    assert taxodist.distance_matrix(resolution, progress=False).loc["Alpha", "Beta"] == 0.5
+
+    named = taxodist.taxo_from_lineages(
+        {"Alpha": ["Root", "Alpha"], "Beta": ["Root", "Beta"]},
+        ids={"Beta": "B", "Alpha": "A"},
+    )
+    assert list(named["id"]) == ["A", "B"]
+    sequence = taxodist.taxo_from_lineages(
+        {"Alpha": ["Root", "Alpha"]}, ids=["A"]
+    )
+    assert sequence.iloc[0]["id"] == "A"
+
+    bad_calls = [
+        lambda: taxodist.taxo_from_lineages([]),
+        lambda: taxodist.taxo_from_lineages({"": ["Root"]}),
+        lambda: taxodist.taxo_from_lineages({"Alpha": []}),
+        lambda: taxodist.taxo_from_lineages({"Alpha": ["Root", ""]}),
+        lambda: taxodist.taxo_from_lineages({"Alpha": ["Root"]}, source=""),
+        lambda: taxodist.taxo_from_lineages({"Alpha": ["Root"]}, ids=1),
+        lambda: taxodist.taxo_from_lineages({"Alpha": ["Root"]}, ids={}),
+        lambda: taxodist.taxo_from_lineages({"Alpha": ["Root"]}, ids=[]),
+        lambda: taxodist.taxo_from_lineages(
+            {"Alpha": ["Root"], "Beta": ["Root"]}, ids=["same", "same"]
+        ),
+    ]
+    for call in bad_calls:
+        with pytest.raises((TypeError, ValueError)):
+            call()
+
+
+def test_distance_matrix_accepts_resolution_bundle_and_rejects_malformed():
+    resolution = _offline_resolution()
+    matrix = taxodist.distance_matrix(resolution, progress=True)
+    assert list(matrix.index) == ["Alpha", "Beta"]
+
+    invalid = TaxodistResolution({"input": ["Alpha"], "status": ["resolved"]})
+    with pytest.raises(ValueError, match="Invalid TaxodistResolution"):
+        taxodist.distance_matrix(invalid, progress=False)
+
+    bundle = taxodist.taxo_bundle(resolution, progress=False)
+    assert taxodist.distance_matrix(bundle) is bundle["matrix"]
+
+
+def test_bundle_construction_round_trip_and_portable_values(tmp_path):
+    resolution = taxodist.taxo_from_lineages(
+        {
+            "Alpha": ["Biota", "Animalia", "Alpha"],
+            "Plant": ["Natura", "Plantae", "Plant"],
+        },
+        source="Local taxonomy",
+    )
+    bundle = taxodist.taxo_bundle(resolution, progress=False)
+    assert isinstance(bundle, TaxodistBundle)
+    assert bundle.schema_version == "1.0"
+    assert bundle.source == {
+        "name": "Local taxonomy",
+        "url": None,
+        "retrieved_at": resolution.retrieved_at,
+    }
+    assert bundle.software["language"] == "Python"
+    assert np.isinf(bundle.matrix.loc["Alpha", "Plant"])
+
+    path = tmp_path / "bundle.json"
+    assert taxodist.write_taxodist_bundle(bundle, path) == str(path.resolve())
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["format"] == "taxodist_bundle"
+    assert raw["matrix"]["values"][0][1] == "Infinity"
+    restored = taxodist.read_taxodist_bundle(path)
+    assert isinstance(restored, TaxodistBundle)
+    assert restored.resolution.source == "Local taxonomy"
+    assert np.isinf(restored.matrix.loc["Alpha", "Plant"])
+
+    bundle.matrix.iloc[0, 1] = bundle.matrix.iloc[1, 0] = -np.inf
+    path = tmp_path / "negative.json"
+    with pytest.raises(ValueError, match="stored distances"):
+        taxodist.write_taxodist_bundle(bundle, path)
+
+
+def test_empty_bundle_round_trip(tmp_path):
+    resolution = taxodist.taxo_from_lineages({})
+    bundle = taxodist.taxo_bundle(resolution, progress=False)
+    path = tmp_path / "empty.json"
+    taxodist.write_taxodist_bundle(bundle, path, pretty=False)
+    restored = taxodist.read_taxodist_bundle(path)
+    assert restored.matrix.shape == (0, 0)
+    assert restored.resolution.empty
+
+
+def test_bundle_default_source_and_name_resolution_path():
+    resolution = _offline_resolution()
+    resolution.source = ""
+    resolution.source_url = None
+    bundle = taxodist.taxo_bundle(resolution, progress=False)
+    assert bundle.source["name"] == "The Taxonomicon"
+    assert bundle.source["url"] == "http://taxonomicon.taxonomy.nl"
+
+    with patch("taxodist.bundle.taxo_resolve", return_value=_offline_resolution()) as resolve:
+        taxodist.taxo_bundle(["Alpha"], ambiguity="first", verbose=True, progress=False)
+    resolve.assert_called_once_with(
+        ["Alpha"], ambiguity="first", verbose=True, progress=False
+    )
+
+
+def test_bundle_validator_rejects_every_malformed_component():
+    def bad(change, match):
+        invalid = taxodist.taxo_bundle(_offline_resolution(), progress=False)
+        change(invalid)
+        with pytest.raises((TypeError, ValueError), match=match):
+            validate_taxodist_bundle(invalid)
+
+    with pytest.raises(TypeError, match="TaxodistBundle"):
+        validate_taxodist_bundle({})
+
+    def set_status(x):
+        resolution = x["resolution"]
+        resolution["status"] = ["mystery", "resolved"]
+
+    def set_negative_count(x):
+        resolution = x["resolution"]
+        resolution["n_candidates"] = [-1, 1]
+
+    bad(lambda x: x.pop("metric"), "required fields")
+    bad(lambda x: x.update(schema_version="2.0"), "Unsupported")
+    bad(lambda x: x.update(resolution=pd.DataFrame()), "wrong class")
+    bad(lambda x: x["resolution"].drop(columns="candidates", inplace=True), "fields")
+    bad(set_status, "unknown")
+    bad(set_negative_count, "non-negative")
+    bad(lambda x: x["resolution"].at.__setitem__((0, "candidates"), []), "candidate table")
+    bad(lambda x: x["resolution"].at.__setitem__((0, "n_candidates"), 2), "count mismatch")
+    bad(lambda x: x["resolution"].at.__setitem__((0, "lineage"), None), "depth mismatch")
+    bad(lambda x: x["resolution"].at.__setitem__((0, "lineage_depth"), pd.NA), "depth mismatch")
+    bad(lambda x: x["resolution"].at.__setitem__((0, "lineage"), ["Biota", ""]), "malformed lineage")
+    bad(lambda x: x["resolution"].at.__setitem__((0, "lineage_depth"), 99), "depth mismatch")
+    bad(lambda x: x["resolution"].at.__setitem__((0, "id"), None), "incomplete resolved")
+    bad(lambda x: x["resolution"].at[0, "candidates"].__setitem__("id", ["other"]), "selected candidate")
+
+    def incomplete(x):
+        x["resolution"].at[0, "status"] = "unresolved"
+
+    bad(incomplete, "incomplete unresolved")
+
+    def unresolved_candidates(x):
+        row = x["resolution"].index[0]
+        x["resolution"].at[row, "status"] = "unresolved"
+        x["resolution"].at[row, "id"] = None
+        x["resolution"].at[row, "resolved_name"] = None
+        x["resolution"].at[row, "lineage"] = None
+        x["resolution"].at[row, "lineage_depth"] = pd.NA
+
+    bad(unresolved_candidates, "unresolved record has candidates")
+    bad(lambda x: x.update(matrix=[]), "pandas DataFrame")
+    bad(lambda x: setattr(x["matrix"], "index", ["Beta", "Alpha"]), "matrix labels")
+    bad(lambda x: x["matrix"].__setitem__("Beta", [0.75, 0.0]), "stored distances")
+
+
+@pytest.mark.parametrize(
+    "mutation, message",
+    [
+        (lambda x: x.update(format="wrong"), "unrecognized format"),
+        (lambda x: x.update(schema_version="2.0"), "Unsupported"),
+        (lambda x: x.pop("source"), "required fields"),
+        (lambda x: x["matrix"].update(labels=["A"]), "row count"),
+        (
+            lambda x: x["matrix"].update(labels=["A"], values=[[0, 1]]),
+            "square",
+        ),
+        (lambda x: x["matrix"].update(labels=["A"], values=[[1]]), "diagonal"),
+        (
+            lambda x: x["matrix"].update(
+                labels=["A", "B"], values=[[0, 1], [2, 0]]
+            ),
+            "symmetric",
+        ),
+    ],
+)
+def test_read_bundle_rejects_invalid_json_structures(tmp_path, mutation, message):
+    raw = {
+        "format": "taxodist_bundle",
+        "schema_version": "1.0",
+        "created_at": "now",
+        "source": {"name": "x", "url": None, "retrieved_at": None},
+        "software": {"name": "taxodist", "version": "0.8.0", "language": "R"},
+        "metric": {
+            "name": "inverse_mrca_depth",
+            "definition": "x",
+            "root_depth": 1,
+            "common_ancestor": "continuous common lineage prefix",
+        },
+        "taxa": [],
+        "matrix": {"labels": [], "values": []},
+    }
+    mutation(raw)
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        taxodist.read_taxodist_bundle(path)
+
+
+def test_read_bundle_file_errors_and_attribute_error(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        taxodist.read_taxodist_bundle(tmp_path / "missing.json")
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="Could not parse"):
+        taxodist.read_taxodist_bundle(bad)
+    with pytest.raises(AttributeError):
+        _ = TaxodistBundle().missing
+
+
+def test_bundle_serializes_missing_values_and_parses_negative_infinity(tmp_path):
+    with patch(
+        "taxodist.fetch._taxo_search_details",
+        side_effect=[
+            {"status": "ok", "results": _candidates(("1", "Alpha"))},
+            {"status": "not_found", "results": None},
+        ],
+    ), patch(
+        "taxodist.fetch.get_lineage_by_id",
+        return_value=["Biota", "Alpha"],
+    ):
+        resolution = taxodist.taxo_resolve(
+            ["Alpha", "Missing"], progress=False
+        )
+    bundle = taxodist.taxo_bundle(resolution, progress=False)
+    path = tmp_path / "missing.json"
+    taxodist.write_taxodist_bundle(bundle, path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["matrix"]["values"][0][1] is None
+    assert taxodist.read_taxodist_bundle(path).resolution.iloc[1]["lineage"] is None
+
+    negative = _parse_matrix(
+        {"labels": ["A", "B"], "values": [[0, "-Infinity"], ["-Infinity", 0]]}
+    )
+    assert np.isneginf(negative.loc["A", "B"])

@@ -155,8 +155,10 @@ def distance_matrix(taxa, verbose=False, progress=True):
 
     Parameters
     ----------
-    taxa : list of str
-        A list of taxon names.
+    taxa : sequence of str, TaxodistResolution, or TaxodistBundle
+        Taxon names are retrieved normally. Resolution objects reuse their
+        stored lineages and preserve their input labels. Bundles return their
+        validated stored matrix without network access or recomputation.
     verbose : bool
         Logical. If True, prints progress for each pair. Default False.
     progress : bool
@@ -169,17 +171,35 @@ def distance_matrix(taxa, verbose=False, progress=True):
         Row and column names are set to the input taxon names.
         Taxa that could not be found are included with NaN distances.
     """
-    n = len(taxa)
+    if getattr(taxa, "_taxodist_bundle", False):
+        from .bundle import validate_taxodist_bundle
+
+        validate_taxodist_bundle(taxa)
+        return taxa["matrix"]
+
+    is_resolution = getattr(taxa, "_taxodist_resolution", False)
+    if is_resolution:
+        required = {"input", "status", "lineage"}
+        if not required.issubset(taxa.columns):
+            raise ValueError("Invalid TaxodistResolution object")
+        labels = list(taxa["input"])
+        lineages = list(taxa["lineage"])
+    else:
+        labels = list(taxa)
+
+    n = len(labels)
     mat = np.full((n, n), np.nan)
     np.fill_diagonal(mat, 0.0)
 
-    if progress:
+    if progress and not is_resolution:
         print(f"Fetching {n} lineages...")
-        
-    lineages =[get_lineage(t, verbose=verbose) for t in taxa]
+
+    if not is_resolution:
+        lineages = [get_lineage(t, verbose=verbose) for t in labels]
     
     if progress:
-        print("Lineages fetched.")
+        if not is_resolution:
+            print("Lineages fetched.")
         total_pairs = int(n * (n - 1) / 2)
         print(f"Computing distances for {total_pairs} pairs...")
 
@@ -193,7 +213,7 @@ def distance_matrix(taxa, verbose=False, progress=True):
     if progress:
         print("Done.")
 
-    return pd.DataFrame(mat, index=taxa, columns=taxa)
+    return pd.DataFrame(mat, index=labels, columns=labels)
 
 
 def closest_relative(taxon, candidates, verbose=False):

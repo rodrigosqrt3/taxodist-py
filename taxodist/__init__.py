@@ -23,6 +23,10 @@ Core functions
 - clear_cache() — clear the session lineage cache
 - cache_info() — inspect the session lineage cache
 - load_taxobase() — load the built-in reference dataset
+- taxo_resolve() — resolve names into an auditable batch table
+- taxo_from_lineages() — create an offline resolution from curated lineages
+- taxo_bundle() — combine resolution, distances, metric, and provenance
+- write_taxodist_bundle() / read_taxodist_bundle() — exchange portable JSON
 
 Mathematical background
 -----------------------
@@ -50,11 +54,12 @@ The Netherlands. Retrieved from The Taxonomicon,
 http://taxonomicon.taxonomy.nl.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 from .fetch import (
     clear_cache, save_cache, load_cache, cache_info,
-    get_taxonomicon_id, get_lineage_by_id, get_lineage, taxo_search
+    get_taxonomicon_id, get_lineage_by_id, get_lineage, taxo_search,
+    TaxodistResolution, taxo_resolve, taxo_from_lineages
 )
 
 from .distance import (
@@ -70,3 +75,11 @@ from .utils import (
 )
 
 from .data import load_taxobase
+
+from .bundle import (
+    TaxodistBundle,
+    taxo_bundle,
+    validate_taxodist_bundle,
+    write_taxodist_bundle,
+    read_taxodist_bundle,
+)
