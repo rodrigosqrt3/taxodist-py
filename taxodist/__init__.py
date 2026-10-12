@@ -12,6 +12,8 @@ Core functions
 - taxo_distance() — compute the hierarchy distance between two taxa
 - mrca() — find the most recent common ancestor
 - distance_matrix() — compute all pairwise distances for a set of taxa
+- cross_distances() — compute distances between two sets of taxa
+- taxo_tree() — build a classification tree with named clades (Newick export)
 - closest_relative() — find the closest relative among candidates
 - focal_distances() — compare one focal taxon with a community
 - compare_lineages() — print a side-by-side lineage comparison
@@ -27,6 +29,10 @@ Core functions
 - taxo_from_lineages() — create an offline resolution from curated lineages
 - taxo_bundle() — combine resolution, distances, metric, and provenance
 - write_taxodist_bundle() / read_taxodist_bundle() — exchange portable JSON
+- compare_bundles() — report what changed between two analyses
+
+Requests to The Taxonomicon are retried after transient failures; set
+``taxodist.fetch.MAX_TRIES`` to change the number of attempts (default 3).
 
 Mathematical background
 -----------------------
@@ -54,7 +60,7 @@ The Netherlands. Retrieved from The Taxonomicon,
 http://taxonomicon.taxonomy.nl.
 """
 
-__version__ = "0.8.0"
+from ._version import __version__
 
 from .fetch import (
     clear_cache, save_cache, load_cache, cache_info,
@@ -63,9 +69,11 @@ from .fetch import (
 )
 
 from .distance import (
-    taxo_distance, mrca, distance_matrix, closest_relative,
+    taxo_distance, mrca, distance_matrix, cross_distances, closest_relative,
     focal_distances, lineage_depth, check_coverage, taxo_cluster, taxo_ordinate
 )
+
+from .tree import TaxodistTree, taxo_tree
 
 from .utils import (
     compare_lineages, shared_clades, is_member, filter_clade,
@@ -78,8 +86,10 @@ from .data import load_taxobase
 
 from .bundle import (
     TaxodistBundle,
+    TaxodistBundleComparison,
     taxo_bundle,
     validate_taxodist_bundle,
     write_taxodist_bundle,
     read_taxodist_bundle,
+    compare_bundles,
 )

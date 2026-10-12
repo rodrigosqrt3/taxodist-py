@@ -158,7 +158,7 @@ def filter_clade(taxa, clade, verbose=False):
             kept.append(t)
     return kept
 
-def taxo_heatmap(taxa, **kwargs):
+def taxo_heatmap(taxa, verbose=False, progress=True, **kwargs):
     """
     Plot a taxonomic heatmap
 
@@ -168,20 +168,23 @@ def taxo_heatmap(taxa, **kwargs):
 
     Parameters
     ----------
-    taxa : list of str or pandas.DataFrame
-        A list of taxon names, or a distance matrix DataFrame.
+    taxa : list of str, TaxodistResolution, TaxodistBundle, or pandas.DataFrame
+        Taxon names, a resolution or bundle, or a distance matrix DataFrame.
+    verbose, progress : bool
+        Passed to distance_matrix() when ``taxa`` is not already a matrix.
     **kwargs : dict
-        Additional arguments passed to seaborn.clustermap.
+        Additional arguments passed to seaborn.clustermap. They override the
+        defaults ``cmap="YlGnBu_r"`` and ``annot=True``.
 
     Returns
     -------
     pandas.DataFrame
         The underlying distance matrix.
     """
-    if isinstance(taxa, pd.DataFrame):
+    if isinstance(taxa, pd.DataFrame) and not getattr(taxa, "_taxodist_resolution", False):
         d = taxa
     else:
-        d = distance_matrix(taxa)
+        d = distance_matrix(taxa, verbose=verbose, progress=progress)
 
     if np.isnan(d.values).any():
         warnings.warn("Distance matrix contains NaN values. Heatmap skipped.")
@@ -192,7 +195,9 @@ def taxo_heatmap(taxa, **kwargs):
     if d.shape[0] < 2:
         warnings.warn("At least two taxa are required for a heatmap. Heatmap skipped.")
         return d
-    sns.clustermap(d, cmap="YlGnBu_r", annot=True, **kwargs)
+    options = {"cmap": "YlGnBu_r", "annot": True}
+    options.update(kwargs)
+    sns.clustermap(d, **options)
     plt.show()
     
     return d

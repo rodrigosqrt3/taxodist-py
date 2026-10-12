@@ -8,6 +8,7 @@ import os
 import numpy as np
 import pandas as pd
 
+from ._version import __version__
 from .fetch import (
     RESOLUTION_COLUMNS,
     TaxodistResolution,
@@ -32,8 +33,13 @@ def _utc_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True):
-    """Combine resolution, distances, metric definition, and provenance."""
+def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True, within=None):
+    """
+    Combine resolution, distances, metric definition, and provenance.
+
+    ``ambiguity``, ``verbose``, ``progress``, and ``within`` are passed to
+    ``taxo_resolve()`` when ``taxa`` is a sequence of names.
+    """
     from .distance import distance_matrix
 
     resolution = (
@@ -44,6 +50,7 @@ def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True):
             ambiguity=ambiguity,
             verbose=verbose,
             progress=progress,
+            within=within,
         )
     )
     source_name = getattr(resolution, "source", None)
@@ -60,7 +67,7 @@ def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True):
             "url": source_url,
             "retrieved_at": getattr(resolution, "retrieved_at", None),
         },
-        software={"name": "taxodist", "version": "0.8.0", "language": "Python"},
+        software={"name": "taxodist", "version": __version__, "language": "Python"},
         metric={
             "name": "inverse_mrca_depth",
             "definition": "0 for identical lineages; otherwise 1 / depth(MRCA)",
@@ -72,8 +79,15 @@ def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True):
     )
 
 
-def validate_taxodist_bundle(bundle):
-    """Validate the internal consistency of a TaxodistBundle."""
+def validate_taxodist_bundle(bundle, check_distances=True):
+    """
+    Validate the internal consistency of a TaxodistBundle.
+
+    Structural checks are cheap and always run. With ``check_distances=True``
+    (the default, used when writing and reading bundles) every stored
+    distance is also recomputed from the stored lineages; using a bundle in
+    ``distance_matrix()`` skips that step.
+    """
     from .distance import distance_matrix
 
     if not isinstance(bundle, TaxodistBundle):
@@ -147,6 +161,8 @@ def validate_taxodist_bundle(bundle):
     labels = list(resolution["input"])
     if list(matrix.index) != labels or list(matrix.columns) != labels:
         raise ValueError("Invalid bundle: matrix labels do not match the resolution inputs")
+    if not check_distances:
+        return bundle
     expected = distance_matrix(resolution, progress=False)
     if matrix.shape != expected.shape or not np.allclose(
         matrix.to_numpy(dtype=float),
@@ -299,3 +315,154 @@ def read_taxodist_bundle(file):
         matrix=_parse_matrix(raw["matrix"]),
     )
     return validate_taxodist_bundle(bundle)
+
+
+class TaxodistBundleComparison(dict):
+    """Result of compare_bundles(); ``print()`` shows a summary."""
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as error:
+            raise AttributeError(name) from error
+
+    def __str__(self):
+        taxa = self["taxa"]
+        changed = taxa.loc[taxa["change"] != "unchanged"]
+        lines = [
+            "taxodist Bundle Comparison",
+            f"* Old bundle: {self['created_old']}",
+            f"* New bundle: {self['created_new']}",
+            f"* Taxa compared: {len(taxa)} ({len(changed)} changed)",
+            f"* Distances changed: {len(self['distances'])}",
+        ]
+        if changed.empty:
+            lines.append("No taxon changed between the two bundles.")
+        else:
+            lines.extend(f"> {row.input}: {row.change}" for row in changed.itertuples())
+        return "\n".join(lines)
+
+
+def compare_bundles(old, new, tolerance=math.sqrt(np.finfo(float).eps)):
+    """
+    Compare two taxodist bundles
+
+    Reports how the resolution of each taxon and the pairwise distances
+    changed between two bundles, for example when an analysis is repeated
+    after The Taxonomicon updated its classification.
+
+    Parameters
+    ----------
+    old, new : TaxodistBundle or str
+        Bundles, or paths to JSON files written by write_taxodist_bundle().
+    tolerance : float
+        Distances closer than this are considered equal.
+
+    Returns
+    -------
+    TaxodistBundleComparison
+        A dictionary with:
+        - taxa: DataFrame with one row per input label found in either bundle
+          and columns input, change, status_old, status_new, id_old, id_new,
+          depth_old, depth_new. ``change`` is one of "unchanged", "added",
+          "removed", "status_changed", "id_changed", or "lineage_changed".
+        - distances: DataFrame of pairs of inputs present in both bundles
+          whose distance changed (taxon_a, taxon_b, distance_old,
+          distance_new).
+        - created_old, created_new: creation timestamps.
+    """
+    def as_bundle(value, name):
+        if isinstance(value, (str, os.PathLike)):
+            value = read_taxodist_bundle(value)
+        if not isinstance(value, TaxodistBundle):
+            raise TypeError(f"{name} must be a TaxodistBundle or the path to a bundle file")
+        return validate_taxodist_bundle(value, check_distances=False)
+
+    old = as_bundle(old, "old")
+    new = as_bundle(new, "new")
+    res_old = old["resolution"].reset_index(drop=True)
+    res_new = new["resolution"].reset_index(drop=True)
+
+    def first_positions(resolution):
+        positions = {}
+        for position, label in enumerate(resolution["input"]):
+            positions.setdefault(label, position)
+        return positions
+
+    pos_old = first_positions(res_old)
+    pos_new = first_positions(res_new)
+    inputs = list(dict.fromkeys(list(res_old["input"]) + list(res_new["input"])))
+
+    def value(resolution, positions, label, column):
+        if label not in positions:
+            return None
+        item = resolution.iloc[positions[label]][column]
+        return None if item is None or (not isinstance(item, list) and pd.isna(item)) else item
+
+    rows = []
+    for label in inputs:
+        record = {"input": label}
+        for suffix, resolution, positions in (
+            ("old", res_old, pos_old),
+            ("new", res_new, pos_new),
+        ):
+            record[f"status_{suffix}"] = value(resolution, positions, label, "status")
+            record[f"id_{suffix}"] = value(resolution, positions, label, "id")
+            record[f"depth_{suffix}"] = value(resolution, positions, label, "lineage_depth")
+            record[f"lineage_{suffix}"] = value(resolution, positions, label, "lineage")
+        if label not in pos_old:
+            change = "added"
+        elif label not in pos_new:
+            change = "removed"
+        elif record["status_old"] != record["status_new"]:
+            change = "status_changed"
+        elif record["id_old"] != record["id_new"]:
+            change = "id_changed"
+        elif record["lineage_old"] != record["lineage_new"]:
+            change = "lineage_changed"
+        else:
+            change = "unchanged"
+        record["change"] = change
+        rows.append(record)
+
+    taxa = pd.DataFrame(
+        rows,
+        columns=["input", "change", "status_old", "status_new", "id_old", "id_new",
+                 "depth_old", "depth_new"],
+    )
+    taxa["depth_old"] = pd.array(taxa["depth_old"], dtype="Int64")
+    taxa["depth_new"] = pd.array(taxa["depth_new"], dtype="Int64")
+
+    shared = [label for label in inputs if label in pos_old and label in pos_new]
+    changed_pairs = []
+    if len(shared) > 1:
+        matrix_old = old["matrix"].to_numpy(dtype=float)
+        matrix_new = new["matrix"].to_numpy(dtype=float)
+        for j in range(len(shared)):
+            for i in range(j + 1, len(shared)):
+                a, b = shared[j], shared[i]
+                value_old = matrix_old[pos_old[b], pos_old[a]]
+                value_new = matrix_new[pos_new[b], pos_new[a]]
+                both_missing = np.isnan(value_old) and np.isnan(value_new)
+                equal = both_missing or value_old == value_new or (
+                    not np.isnan(value_old) and not np.isnan(value_new)
+                    and abs(value_old - value_new) <= tolerance
+                )
+                if not equal:
+                    changed_pairs.append({
+                        "taxon_a": a,
+                        "taxon_b": b,
+                        "distance_old": value_old,
+                        "distance_new": value_new,
+                    })
+    distances = pd.DataFrame(
+        changed_pairs,
+        columns=["taxon_a", "taxon_b", "distance_old", "distance_new"],
+    )
+
+    return TaxodistBundleComparison(
+        taxa=taxa,
+        distances=distances,
+        created_old=old["created_at"],
+        created_new=new["created_at"],
+    )

@@ -5,7 +5,7 @@ import pandas as pd
 from scipy.cluster.hierarchy import linkage
 from scipy.spatial.distance import squareform
 
-from .fetch import get_lineage, get_taxonomicon_id
+from .fetch import get_lineage, get_taxonomicon_id, _lookup_taxonomicon_id
 
 def _common_prefix_depth(lin_a, lin_b):
     """Return the length of the continuous common prefix."""
@@ -174,46 +174,126 @@ def distance_matrix(taxa, verbose=False, progress=True):
     if getattr(taxa, "_taxodist_bundle", False):
         from .bundle import validate_taxodist_bundle
 
-        validate_taxodist_bundle(taxa)
+        validate_taxodist_bundle(taxa, check_distances=False)
         return taxa["matrix"]
 
-    is_resolution = getattr(taxa, "_taxodist_resolution", False)
-    if is_resolution:
-        required = {"input", "status", "lineage"}
-        if not required.issubset(taxa.columns):
-            raise ValueError("Invalid TaxodistResolution object")
-        labels = list(taxa["input"])
-        lineages = list(taxa["lineage"])
-    else:
-        labels = list(taxa)
-
+    labels, lineages = _matrix_input(taxa, verbose=verbose, progress=progress)
     n = len(labels)
-    mat = np.full((n, n), np.nan)
-    np.fill_diagonal(mat, 0.0)
 
-    if progress and not is_resolution:
-        print(f"Fetching {n} lineages...")
-
-    if not is_resolution:
-        lineages = [get_lineage(t, verbose=verbose) for t in labels]
-    
     if progress:
-        if not is_resolution:
-            print("Lineages fetched.")
-        total_pairs = int(n * (n - 1) / 2)
-        print(f"Computing distances for {total_pairs} pairs...")
-
-    for i in range(n - 1):
-        for j in range(i + 1, n):
-            if lineages[i] is not None and lineages[j] is not None:
-                value = _distance_value(lineages[i], lineages[j])
-                mat[i, j] = value
-                mat[j, i] = value
-
+        print(f"Computing distances for {n * (n - 1) // 2} pairs...")
+    mat = _distance_block(lineages, lineages)
+    np.fill_diagonal(mat, 0.0)
     if progress:
         print("Done.")
 
     return pd.DataFrame(mat, index=labels, columns=labels)
+
+
+def cross_distances(x, y, verbose=False, progress=True):
+    """
+    Compute taxonomic distances between two sets of taxa
+
+    Returns the rectangular matrix of distances from every taxon in ``x`` to
+    every taxon in ``y``, for example from the species of a community to a
+    set of reference taxa, without computing the full square matrix of the
+    combined set.
+
+    Parameters
+    ----------
+    x, y : sequence of str, TaxodistResolution, or TaxodistBundle
+        Taxon names, or resolutions whose stored lineages are reused.
+    verbose : bool
+        If True, prints retrieval messages.
+    progress : bool
+        If True, prints progress messages.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per element of ``x`` and one column per element of ``y``.
+        Taxa that could not be found have NaN distances; taxa without a
+        common ancestor have ``inf``.
+    """
+    labels_x, lineages_x = _matrix_input(x, verbose=verbose, progress=progress)
+    labels_y, lineages_y = _matrix_input(y, verbose=verbose, progress=progress)
+    return pd.DataFrame(
+        _distance_block(lineages_x, lineages_y),
+        index=labels_x,
+        columns=labels_y,
+        dtype=float,
+    )
+
+
+def _matrix_input(taxa, verbose=False, progress=True):
+    """Return ``(labels, lineages)`` for names, resolutions, or bundles."""
+    if getattr(taxa, "_taxodist_bundle", False):
+        taxa = taxa["resolution"]
+    if getattr(taxa, "_taxodist_resolution", False):
+        required = {"input", "status", "lineage"}
+        if not required.issubset(taxa.columns):
+            raise ValueError("Invalid TaxodistResolution object")
+        return list(taxa["input"]), list(taxa["lineage"])
+    if isinstance(taxa, (str, bytes)):
+        raise TypeError("taxa must be a sequence of taxon names, not a single string")
+
+    labels = list(taxa)
+    if progress:
+        print(f"Fetching {len(labels)} lineages...")
+    lineages = [
+        None if t is None or (isinstance(t, float) and np.isnan(t))
+        else get_lineage(t, verbose=verbose)
+        for t in labels
+    ]
+    if progress:
+        print("Lineages fetched.")
+    return labels, lineages
+
+
+def _prefix_node_ids(lineages):
+    """
+    Integer matrix identifying each lineage node by its full path from root.
+
+    Two lineages share the node at depth ``d`` if and only if their
+    identifiers at ``d`` are equal, and equality at ``d`` implies equality at
+    every shallower depth, so the MRCA depth of two taxa is the number of
+    depths at which their identifiers agree. Missing depths are ``-1``.
+    """
+    lengths = [0 if lineage is None else len(lineage) for lineage in lineages]
+    max_depth = max(lengths, default=0)
+    ids = np.full((len(lineages), max_depth), -1, dtype=np.int64)
+    codes = {}
+    for row, lineage in enumerate(lineages):
+        parent = -1
+        for depth, node in enumerate(lineage or ()):
+            key = (depth, parent, node)
+            parent = codes.setdefault(key, len(codes))
+            ids[row, depth] = parent
+    return ids, np.asarray(lengths, dtype=np.int64)
+
+
+def _distance_block(lineages_a, lineages_b):
+    """Vectorized distances between every lineage in ``a`` and ``b``."""
+    ids, lengths = _prefix_node_ids(list(lineages_a) + list(lineages_b))
+    n_a = len(lineages_a)
+    ids_a, ids_b = ids[:n_a], ids[n_a:]
+    len_a, len_b = lengths[:n_a], lengths[n_a:]
+
+    out = np.full((n_a, len(lineages_b)), np.nan)
+    for column in range(len(lineages_b)):
+        shared = (ids_a == ids_b[column]) & (ids_a >= 0)
+        mrca_depth = shared.sum(axis=1)
+        with np.errstate(divide="ignore"):
+            values = 1.0 / mrca_depth
+        identical = (mrca_depth > 0) & (mrca_depth == len_b[column]) & (len_a == len_b[column])
+        values[identical] = 0.0
+        out[:, column] = values
+
+    missing_a = np.array([lineage is None for lineage in lineages_a], dtype=bool)
+    missing_b = np.array([lineage is None for lineage in lineages_b], dtype=bool)
+    out[missing_a, :] = np.nan
+    out[:, missing_b] = np.nan
+    return out
 
 
 def closest_relative(taxon, candidates, verbose=False):
@@ -318,30 +398,22 @@ def focal_distances(focal, community, verbose=False, progress=True):
         if progress:
             print(f"  [{i + 1}/{len(community)}] {taxon}")
 
-        if taxon == focal:
+        cand_lin = get_lineage(taxon, verbose=verbose)
+        if cand_lin is None:
             results.append({
                 "taxon":      taxon,
-                "distance":   0.0,
-                "mrca":       focal,
-                "mrca_depth": len(focal_lin)
+                "distance":   float("nan"),
+                "mrca":       None,
+                "mrca_depth": None
             })
         else:
-            cand_lin = get_lineage(taxon, verbose=verbose)
-            if cand_lin is None:
-                results.append({
-                    "taxon":      taxon,
-                    "distance":   float("nan"),
-                    "mrca":       None,
-                    "mrca_depth": None
-                })
-            else:
-                res = _compute_distance(focal_lin, cand_lin, focal, taxon)
-                results.append({
-                    "taxon":      taxon,
-                    "distance":   res["distance"],
-                    "mrca":       res["mrca"],
-                    "mrca_depth": res["mrca_depth"]
-                })
+            res = _compute_distance(focal_lin, cand_lin, focal, taxon)
+            results.append({
+                "taxon":      taxon,
+                "distance":   res["distance"],
+                "mrca":       res["mrca"],
+                "mrca_depth": res["mrca_depth"]
+            })
 
     if progress:
         print("Done.")
@@ -394,14 +466,17 @@ def check_coverage(taxa, verbose=False):
     Returns
     -------
     pandas.Series
-        A boolean Series indexed by taxon names. True indicates the taxon was found,
-        False indicates it was not.
-    """    
+        A nullable boolean Series indexed by taxon names. True indicates the
+        taxon was found, False that it is absent from The Taxonomicon, and
+        ``pd.NA`` that the answer is unknown because the server could not be
+        reached.
+    """
+    outcome = {"found": True, "not_found": False}
     values = [
-        get_taxonomicon_id(t, verbose=verbose) is not None
+        outcome.get(_lookup_taxonomicon_id(t, verbose=verbose)[1], pd.NA)
         for t in taxa
     ]
-    return pd.Series(values, index=taxa, dtype=bool)
+    return pd.Series(values, index=list(taxa), dtype="boolean")
 
 
 def taxo_cluster(taxa, method="average", **kwargs):

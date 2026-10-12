@@ -47,20 +47,37 @@ filter_clade(taxa, "Dinosauria")
 taxo_path("Tyrannosaurus", "Velociraptor")
 
 # Save and restore the lineage cache across sessions
-save_cache("my_cache.pkl")
-load_cache("my_cache.pkl")
+save_cache()            # persistent per-user file; or save_cache("my_cache.pkl")
+load_cache()
+```
+
+## Trees and distances between sets
+
+```python
+from taxodist import taxo_tree, cross_distances
+
+# Classification tree whose internal nodes are named clades
+tree = taxo_tree(theropods)
+print(tree.to_newick())        # for Bio.Phylo, ete3, dendropy, ...
+tree.cophenetic()              # equals distance_matrix(theropods)
+
+# Rectangular matrix: community (rows) x reference taxa (columns)
+cross_distances(["Tyrannosaurus", "Triceratops"], ["Velociraptor", "Homo"])
 ```
 
 ## Auditable resolution and portable bundles
 
-Release 0.8.0 can resolve a complete input list before an analysis, preserving
+`taxo_resolve()` resolves a complete input list before an analysis, preserving
 the candidates considered, selected ID, lineage, lineage depth, and one of the
-statuses `resolved`, `ambiguous`, `unresolved`, or `retrieval_error`:
+statuses `resolved`, `ambiguous`, `unresolved`, or `retrieval_error`.
+`within` restricts homonyms to a clade, and the resulting matrix is identical
+to the one computed from the names:
 
 ```python
 resolved = taxo_resolve(
     ["Tyrannosaurus", "Nereis", "50841"],
     ambiguity="warn",
+    within="Animalia",
 )
 distances = distance_matrix(resolved)
 ```
@@ -85,6 +102,10 @@ bundle = taxo_bundle(resolved)
 write_taxodist_bundle(bundle, "analysis.taxodist.json")
 restored = read_taxodist_bundle("analysis.taxodist.json")
 distance_matrix(restored)
+
+# Months later: what changed in the source classification?
+from taxodist import compare_bundles
+print(compare_bundles("analysis.taxodist.json", taxo_bundle(list(restored.resolution["input"]))))
 ```
 
 ## The distance metric
@@ -125,17 +146,20 @@ The package also provides:
 - `closest_relative()` and `focal_distances()`;
 - `compare_lineages()` and `shared_clades()`;
 - `is_member()` and `filter_clade()`;
-- `check_coverage()` and `taxo_search()`;
+- `check_coverage()` (`True`, `False`, or `pd.NA` when the server is
+  unreachable) and `taxo_search()`;
 - `taxo_cluster()`, `taxo_ordinate()`, and `taxo_heatmap()`;
 - `cache_info()`, `save_cache()`, and `load_cache()`.
+
+Requests are retried automatically after transient network errors; set
+`taxodist.fetch.MAX_TRIES` to change the number of attempts (default 3).
 
 Distance matrices are returned as symmetric `pandas.DataFrame` objects and can
 be passed directly to the clustering, ordination, and plotting helpers.
 
 ## Reproducible reference data
 
-`load_taxobase()` loads the packaged offline reference object. For release
-0.8.0 it is exported from the same `taxobase` object distributed with the R
+`load_taxobase()` loads the packaged offline reference object. It is exported from the same `taxobase` object distributed with the R
 package, preserving taxon order, matrices, examples, and provenance metadata
 across both implementations.
 
@@ -149,6 +173,11 @@ save_cache("taxodist-cache.pkl")
 clear_cache()
 load_cache("taxodist-cache.pkl")
 ```
+
+Without a file argument, `save_cache()` and `load_cache()` use a persistent
+per-user file (`%LOCALAPPDATA%\taxodist\Cache` on Windows,
+`~/Library/Caches/taxodist` on macOS, `$XDG_CACHE_HOME/taxodist` elsewhere);
+set `TAXODIST_CACHE_DIR` to choose another directory.
 
 Only load cache files that you trust. As with any pickle file, loading an
 untrusted file can execute arbitrary code.

@@ -213,3 +213,79 @@
   matrices and stored lineages.
 * `distance_matrix()` accepts a validated bundle and returns its stored matrix
   without retrieval or recomputation.
+
+
+# taxodist 0.9.0
+
+This release mirrors taxodist 0.9.0 for R. See `PORTING-0.9.0.md` for the
+correspondence between the three implementations.
+
+## Bug fixes
+
+* `taxo_resolve()` now truncates each selected lineage at the queried taxon
+  exactly as `get_lineage()` does. Previously it stored the raw page lineage,
+  so for genera whose page does not list the genus itself (e.g.
+  *Periplaneta*) the lineage stopped at the family and
+  `distance_matrix(taxo_resolve(x))` could differ from `distance_matrix(x)`.
+* Cleaned and uncleaned lineages are cached separately (`lin_<id>` and
+  `rawlin_<id>`). Previously `get_lineage_by_id(id, clean=False)` poisoned the
+  cache for later calls with `clean=True`. One request now fills both entries.
+* Taxon names are normalized before lookup (surrounding whitespace removed,
+  repeated spaces collapsed) and the queried name is located in the lineage
+  case-insensitively. `get_lineage("tyrannosaurus")` no longer appends a
+  spurious extra node.
+* `taxo_heatmap()` accepts `cmap` and `annot` without raising "got multiple
+  values for keyword argument", accepts resolutions and bundles, and has
+  explicit `verbose` and `progress` arguments.
+* `cache_info()` reports the names of cached taxa in `taxa` and their IDs in
+  a new `ids` entry; it previously listed only the IDs.
+* `get_lineage_by_id()` and `get_lineage()` raise `TypeError` for a
+  collection of several IDs or names instead of silently returning `None`.
+* `focal_distances()` reports the terminal lineage node as the MRCA of a
+  community member identical to the focal taxon.
+* The User-Agent header and the bundle `software.version` field now report
+  the installed version instead of a hard-coded string.
+* `distance_matrix()` raises `TypeError` for a single string instead of
+  treating each character as a taxon name.
+
+## Behavior changes
+
+* `check_coverage()` returns a nullable `boolean` Series with `pd.NA` when
+  The Taxonomicon could not be reached, instead of reporting such names as
+  absent (`False`).
+* `save_cache()` returns the path of the written file.
+* Using a bundle in `distance_matrix()` validates its structure only; the
+  full recomputation of every distance runs in `write_taxodist_bundle()` and
+  `read_taxodist_bundle()` (`validate_taxodist_bundle(bundle,
+  check_distances=True)`).
+
+## Performance
+
+* Distance matrices are computed with NumPy from integer prefix identifiers
+  (each node identifies its full path from the root), replacing the
+  pure-Python double loop over pairs.
+* HTTP requests are retried with exponential backoff after network errors and
+  server errors (5xx). Set `taxodist.fetch.MAX_TRIES` to change the number of
+  attempts (default 3).
+* Each candidate lineage is retrieved once while resolving a name (it was
+  previously retrieved a second time during disambiguation).
+
+## New features
+
+* `taxo_tree()` builds a `TaxodistTree` directly from lineages: internal nodes
+  are named clades, `to_newick()` exports the tree, and `cophenetic()`
+  reproduces `distance_matrix()` exactly.
+* `cross_distances(x, y)` computes the rectangular matrix between two sets of
+  taxa.
+* `compare_bundles(old, new)` reports which taxa changed status, identifier,
+  or lineage between two bundles and which distances changed. JSON paths are
+  accepted directly.
+* `taxo_resolve()` and `taxo_bundle()` gain `within`, which restricts
+  candidates to a clade (e.g. `within="Animalia"`).
+* `save_cache()` and `load_cache()` default to a persistent per-user cache
+  file (`TAXODIST_CACHE_DIR` overrides the directory).
+
+## Tests
+
+* New test modules cover resolution, vectorized matrices, trees, bundle
+  comparison, and the persistent cache; coverage remains complete.

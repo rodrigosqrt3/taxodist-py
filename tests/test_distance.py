@@ -39,7 +39,7 @@ def test_taxodist_package_loads():
 def test_fetch_uses_one_persistent_http_session():
     assert isinstance(fetch._http_session, requests.Session)
     assert fetch._http_session.headers["User-Agent"] == (
-        "taxodist Python package/0.8.0"
+        f"taxodist Python package/{taxodist.__version__}"
     )
 
 def test_compute_distance_works_correctly():
@@ -167,7 +167,7 @@ def test_save_cache_creates_file_with_cache_contents():
     with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
         tmp_name = tmp.name
     try:
-        assert save_cache(tmp_name) is None
+        assert save_cache(tmp_name) == tmp_name
         assert os.path.exists(tmp_name)
     finally:
         os.remove(tmp_name)
@@ -208,12 +208,12 @@ def test_load_cache_errors_on_missing_file():
     with pytest.raises(FileNotFoundError):
         load_cache("nonexistent_file.pkl")
 
-def test_save_cache_returns_invisible_null():
+def test_save_cache_returns_written_path():
     clear_cache()
     with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as tmp:
         tmp_name = tmp.name
     try:
-        assert save_cache(tmp_name) is None
+        assert save_cache(tmp_name) == tmp_name
     finally:
         os.remove(tmp_name)
 
@@ -881,7 +881,7 @@ def test_cache_info_returns_dict_with_correct_structure():
     clear_cache()
     result = fetch.cache_info()
     assert isinstance(result, dict)
-    assert set(result.keys()) == {"n_lineages", "n_ids", "taxa", "size_bytes"}
+    assert set(result.keys()) == {"n_lineages", "n_ids", "taxa", "ids", "size_bytes"}
 
 def test_cache_info_reports_zero_counts_on_empty_cache():
     clear_cache()
@@ -899,12 +899,14 @@ def test_cache_info_counts_lineages_and_ids_correctly():
     assert result["n_lineages"] == 1
     assert result["n_ids"] == 2
 
-def test_cache_info_taxa_names_strip_lin_prefix():
+def test_cache_info_reports_taxon_names_alongside_ids():
     clear_cache()
     fetch._taxodist_cache["lin_50841"] = ["Biota", "Animalia", "Tyrannosaurus"]
     fetch._taxodist_cache["lin_12345"] = ["Biota", "Animalia", "Velociraptor"]
+    fetch._taxodist_cache["lin_999"] = []
     result = fetch.cache_info()
-    assert set(result["taxa"]) == {"50841", "12345"}
+    assert result["ids"] == ["12345", "50841", "999"]
+    assert result["taxa"] == ["Velociraptor", "Tyrannosaurus", None]
 
 def test_cache_info_size_bytes_is_positive_when_populated():
     clear_cache()
@@ -1622,10 +1624,11 @@ def test_utils_taxo_heatmap_with_list_and_valid_data(mock_dist, mock_show, mock_
     df = pd.DataFrame(m, index=["A", "B"], columns=["A", "B"])
     mock_dist.return_value = df
     
-    res = taxo_heatmap(["A", "B"])
+    res = taxo_heatmap(["A", "B"], cmap="viridis", annot=False, progress=False)
     assert res is df
-    mock_dist.assert_called_once_with(["A", "B"])
+    mock_dist.assert_called_once_with(["A", "B"], verbose=False, progress=False)
     mock_sns.assert_called_once()
+    assert mock_sns.call_args.kwargs == {"cmap": "viridis", "annot": False}
     mock_show.assert_called_once()
 
 def test_utils_summary_taxodist_ord_success(capsys):
@@ -1672,7 +1675,7 @@ def test_load_taxobase_dimensions_are_correct():
 # ── Version 0.8.0 behavioral contract ────────────────────────────────────────
 
 def test_version_and_public_api_match_release_080():
-    assert taxodist.__version__ == "0.8.0"
+    assert taxodist.__version__ == "0.9.0"
     expected = {
         "cache_info", "check_coverage", "clear_cache", "closest_relative",
         "compare_lineages", "distance_matrix", "filter_clade",
@@ -1910,7 +1913,7 @@ def test_load_cache_accepts_valid_resolved_lineage_entries(tmp_path):
 
 @patch("taxodist.fetch.get_lineage_by_id")
 @patch("taxodist.fetch._http_session.get")
-def test_get_taxonomicon_id_handles_candidate_disappearing_during_disambiguation(
+def test_get_taxonomicon_id_retrieves_each_candidate_lineage_once(
     mock_get, mock_get_lineage_by_id
 ):
     fetch.clear_cache()
@@ -1926,12 +1929,12 @@ def test_get_taxonomicon_id_handles_candidate_disappearing_during_disambiguation
 
     def lineage(identifier, **kwargs):
         calls[identifier] += 1
-        if identifier == "10" and calls[identifier] > 1:
-            return None
         return ["Biota", "Animalia", "Alpha"]
 
     mock_get_lineage_by_id.side_effect = lineage
-    assert fetch.get_taxonomicon_id("Alpha") == "20"
+    with pytest.warns(UserWarning, match="Multiple valid biological entries"):
+        assert fetch.get_taxonomicon_id("Alpha") == "10"
+    assert calls == {"10": 1, "20": 1}
 
 
 @patch("taxodist.fetch._http_session.get")
@@ -2011,8 +2014,8 @@ def _offline_resolution():
 
 
 def test_public_version_and_v080_api():
-    assert taxodist.__version__ == "0.8.0"
-    assert taxodist.fetch._http_session.headers["User-Agent"].endswith("/0.8.0")
+    assert taxodist.__version__ == "0.9.0"
+    assert taxodist.fetch._http_session.headers["User-Agent"].endswith("/0.9.0")
     for name in (
         "TaxodistResolution",
         "taxo_resolve",
@@ -2284,7 +2287,7 @@ def test_bundle_default_source_and_name_resolution_path():
     with patch("taxodist.bundle.taxo_resolve", return_value=_offline_resolution()) as resolve:
         taxodist.taxo_bundle(["Alpha"], ambiguity="first", verbose=True, progress=False)
     resolve.assert_called_once_with(
-        ["Alpha"], ambiguity="first", verbose=True, progress=False
+        ["Alpha"], ambiguity="first", verbose=True, progress=False, within=None
     )
 
 
