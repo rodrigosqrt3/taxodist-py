@@ -321,6 +321,8 @@ written by this version.
   reproducibility) and returns a `TaxodistDistinctnessTest`;
   `print_taxodist_distinctness()` prints either result. Values equal R's
   `taxo_distinctness()` (and `vegan::taxondive()`).
+* `taxonomicon_available()` reports whether The Taxonomicon can be reached,
+  with a short timeout, as in R.
 * **Bundle schema 1.1.** Bundles record the metric (and, for `"ranked"`, its
   `rank_levels`) and the `lineage_ranks` of every taxon (null for unranked
   nodes and missing lineages). Distances are verified with the stored

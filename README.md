@@ -215,6 +215,7 @@ Requests are retried automatically after transient network errors; set
 `taxodist.fetch.MAX_TRIES` to change the number of attempts (default 3).
 Consecutive requests are spaced by at least `taxodist.fetch.MIN_INTERVAL`
 seconds (default 0.25) so that large batches do not overload The Taxonomicon.
+`taxonomicon_available()` checks quickly whether the server can be reached.
 
 Distance matrices are returned as symmetric `pandas.DataFrame` objects and can
 be passed directly to the clustering, ordination, and plotting helpers.

@@ -446,9 +446,11 @@ def test_distance_matrix_works_with_mocked_lineages(mock_get_lineage):
     assert mat.shape == (3, 3)
     assert list(np.diag(mat.values)) == [0.0, 0.0, 0.0]
 
-@patch("taxodist.distance.get_taxonomicon_id")
-def test_check_coverage_returns_named_logical_vector(mock_get_id):
-    mock_get_id.side_effect = lambda t, **kwargs: None if t == "Fakeosaurus" else "12345"
+@patch("taxodist.distance._lookup_taxonomicon_id")
+def test_check_coverage_returns_named_logical_vector(mock_lookup):
+    mock_lookup.side_effect = lambda t, **kwargs: (
+        (None, "not_found") if t == "Fakeosaurus" else ("12345", "found")
+    )
     result = check_coverage(["Tyrannosaurus", "Fakeosaurus"])
     assert isinstance(result, pd.Series)
     assert result["Tyrannosaurus"]
@@ -1036,12 +1038,7 @@ def test_print_focal_distances_handles_none():
 # ── Network tests (skipped if offline) ────────────────────────────────────────
 
 def is_taxonomicon_down():
-    try:
-        import requests
-        res = requests.get("http://taxonomicon.taxonomy.nl", timeout=3)
-        return res.status_code != 200
-    except:
-        return True
+    return not taxodist.taxonomicon_available()
 
 skip_if_offline = pytest.mark.skipif(is_taxonomicon_down(), reason="Taxonomicon server is offline")
 

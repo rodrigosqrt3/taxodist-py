@@ -59,6 +59,47 @@ def _max_tries():
     return max(tries, 1)
 
 
+def taxonomicon_available(timeout=3):
+    """
+    Check whether The Taxonomicon can be reached.
+
+    Sends a single quick request to The Taxonomicon and reports whether it
+    answered. Useful to skip code that needs the server when there is no
+    internet connection or the server is down; lineage retrieval itself
+    already handles failed requests.
+
+    Parameters
+    ----------
+    timeout : float
+        Maximum time to wait for an answer, in seconds.
+
+    Returns
+    -------
+    bool
+        ``True`` if the server answered with a successful response, ``False``
+        otherwise, including when there is no internet connection.
+
+    Examples
+    --------
+    >>> taxonomicon_available()  # doctest: +SKIP
+    True
+    """
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, numbers.Real)
+        or math.isnan(timeout)
+        or timeout <= 0
+    ):
+        raise ValueError("timeout must be a single positive number of seconds.")
+    try:
+        response = _http_session.get(
+            "http://taxonomicon.taxonomy.nl/", timeout=timeout
+        )
+    except requests.exceptions.RequestException:
+        return False
+    return response.status_code == 200
+
+
 def _throttle():
     """Wait until ``MIN_INTERVAL`` seconds have passed since the last request."""
     global _last_request

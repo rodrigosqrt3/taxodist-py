@@ -288,3 +288,21 @@ def test_distance_matrix_agrees_for_names_and_resolution():
     by_resolution = taxodist.distance_matrix(resolution, progress=False)
     pd.testing.assert_frame_equal(by_name, by_resolution)
     assert by_name.iloc[0, 1] == pytest.approx(1 / 3)
+
+
+def test_taxonomicon_available_reports_whether_the_server_answers():
+    with patch.object(fetch._http_session, "get", return_value=html_response("", 200)) as get:
+        assert taxodist.taxonomicon_available() is True
+    assert get.call_args.kwargs["timeout"] == 3
+    with patch.object(fetch._http_session, "get", return_value=html_response("", 503)):
+        assert taxodist.taxonomicon_available() is False
+    with patch.object(
+        fetch._http_session, "get", side_effect=requests.exceptions.Timeout()
+    ):
+        assert taxodist.taxonomicon_available(timeout=0.5) is False
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), "3", True, None])
+def test_taxonomicon_available_validates_timeout(timeout):
+    with pytest.raises(ValueError, match="positive number"):
+        taxodist.taxonomicon_available(timeout=timeout)

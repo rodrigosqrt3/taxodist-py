@@ -38,6 +38,7 @@ Requests to The Taxonomicon are retried after transient failures; set
 ``taxodist.fetch.MAX_TRIES`` to change the number of attempts (default 3).
 Consecutive requests are spaced by at least ``taxodist.fetch.MIN_INTERVAL``
 seconds (default 0.25; set it to 0 to disable throttling).
+``taxonomicon_available()`` checks quickly whether the server can be reached.
 
 Mathematical background
 -----------------------
@@ -75,7 +76,8 @@ from ._version import __version__
 from .fetch import (
     clear_cache, save_cache, load_cache, cache_info,
     get_taxonomicon_id, get_lineage_by_id, get_lineage, lineage_ranks,
-    taxo_search, TaxodistResolution, taxo_resolve, taxo_from_lineages
+    taxo_search, TaxodistResolution, taxo_resolve, taxo_from_lineages,
+    taxonomicon_available
 )
 
 from .distance import (
