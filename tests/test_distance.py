@@ -2328,7 +2328,7 @@ def test_bundle_validator_rejects_every_malformed_component():
     bad(lambda x: x.pop("metric"), "required fields")
     bad(lambda x: x.update(schema_version="2.0"), "Unsupported")
     bad(lambda x: x.update(resolution=pd.DataFrame()), "wrong class")
-    bad(lambda x: x["resolution"].drop(columns="candidates", inplace=True), "fields")
+    bad(lambda x: x["resolution"].__delitem__("candidates"), "fields")
     bad(set_status, "unknown")
     bad(set_negative_count, "non-negative")
     bad(lambda x: x["resolution"].at.__setitem__((0, "candidates"), []), "candidate table")
