@@ -33,15 +33,92 @@ def _utc_timestamp():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True, within=None):
+#: Schema version written by write_taxodist_bundle().
+BUNDLE_SCHEMA_VERSION = "1.1"
+_SUPPORTED_SCHEMA_VERSIONS = ("1.0", "1.1")
+
+_METRIC_NAMES = {
+    "inverse_mrca_depth": "reciprocal",
+    "path_length": "path",
+    "wu_palmer": "wu_palmer",
+    "ranked_path_length": "ranked",
+}
+
+
+def _metric_spec(metric, levels=None):
+    """Portable description of a metric, as stored in bundles."""
+    from .distance import _rank_levels
+
+    definitions = {
+        "reciprocal": (
+            "inverse_mrca_depth",
+            "0 for identical lineages; otherwise 1 / depth(MRCA)",
+        ),
+        "path": (
+            "path_length",
+            "0 for identical lineages; otherwise depth(A) + depth(B) - "
+            "2 depth(MRCA)",
+        ),
+        "wu_palmer": (
+            "wu_palmer",
+            "1 - 2 depth(MRCA) / (depth(A) + depth(B))",
+        ),
+        "ranked": (
+            "ranked_path_length",
+            "Half the path length between the lineages reduced to the root, "
+            "the nodes whose rank is one of rank_levels, and the terminal node",
+        ),
+    }
+    name, definition = definitions[metric]
+    spec = {
+        "name": name,
+        "definition": definition,
+        "root_depth": 1,
+        "common_ancestor": "continuous common lineage prefix",
+    }
+    if metric == "ranked":
+        spec["rank_levels"] = list(_rank_levels() if levels is None else levels)
+    return spec
+
+
+def _metric_from_spec(spec):
+    """``(metric, rank_levels)`` from a stored metric description."""
+    from .distance import _DEFAULT_RANK_LEVELS
+
+    name = spec.get("name") if isinstance(spec, dict) else None
+    if not isinstance(name, str) or name not in _METRIC_NAMES:
+        raise ValueError("Invalid bundle: unknown distance metric.")
+    metric = _METRIC_NAMES[name]
+    if metric != "ranked":
+        return metric, list(_DEFAULT_RANK_LEVELS)
+    levels = spec.get("rank_levels")
+    if isinstance(levels, str):
+        # R writes a single rank level as a JSON string.
+        levels = [levels]
+    if (
+        not isinstance(levels, (list, tuple))
+        or not levels
+        or any(not isinstance(level, str) for level in levels)
+    ):
+        raise ValueError("Invalid bundle: the ranked metric requires rank_levels.")
+    return metric, [level.lower() for level in levels]
+
+
+def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True, within=None,
+                metric="reciprocal"):
     """
     Combine resolution, distances, metric definition, and provenance.
 
     ``ambiguity``, ``verbose``, ``progress``, and ``within`` are passed to
-    ``taxo_resolve()`` when ``taxa`` is a sequence of names.
+    ``taxo_resolve()`` when ``taxa`` is a sequence of names. ``metric`` is the
+    distance metric of the stored matrix (see taxo_distance()); the bundle
+    records it (with the rank levels for ``"ranked"``), so the matrix can be
+    verified from the stored lineages and ranks.
     """
-    from .distance import distance_matrix
+    from .distance import _match_metric, _rank_levels, distance_matrix
 
+    metric = _match_metric(metric)
+    levels = _rank_levels() if metric == "ranked" else None
     resolution = (
         taxa
         if isinstance(taxa, TaxodistResolution)
@@ -55,12 +132,31 @@ def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True, within=Non
     )
     source_name = getattr(resolution, "source", None)
     if source_name is None or pd.isna(source_name) or not str(source_name).strip():
+        # As in R, a resolution without a recorded source is assumed to come
+        # from The Taxonomicon. pd.concat() and other pandas operations can
+        # drop the provenance, so this default is only applied when every
+        # selected ID is a Taxonomicon ID; otherwise the source is unknown and
+        # labelling it would be wrong.
+        ids = [
+            identifier for identifier in resolution["id"]
+            if identifier is not None and not pd.isna(identifier)
+        ]
+        if not all(str(identifier).isdigit() for identifier in ids):
+            raise ValueError(
+                "The resolution has no source provenance (for example after "
+                "pd.concat() of resolutions from different sources) and its "
+                "IDs are not Taxonomicon IDs. Set `resolution.source` (and "
+                "`resolution.source_url`, `resolution.retrieved_at`) before "
+                "calling taxo_bundle()."
+            )
         source_name = "The Taxonomicon"
     source_url = getattr(resolution, "source_url", None)
     if source_url is None and source_name == "The Taxonomicon":
         source_url = "http://taxonomicon.taxonomy.nl"
+    metric_spec = _metric_spec(metric, levels)
+    matrix = distance_matrix(resolution, progress=progress, metric=metric)
     return TaxodistBundle(
-        schema_version="1.0",
+        schema_version=BUNDLE_SCHEMA_VERSION,
         created_at=_utc_timestamp(),
         source={
             "name": source_name,
@@ -68,14 +164,9 @@ def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True, within=Non
             "retrieved_at": getattr(resolution, "retrieved_at", None),
         },
         software={"name": "taxodist", "version": __version__, "language": "Python"},
-        metric={
-            "name": "inverse_mrca_depth",
-            "definition": "0 for identical lineages; otherwise 1 / depth(MRCA)",
-            "root_depth": 1,
-            "common_ancestor": "continuous common lineage prefix",
-        },
+        metric=metric_spec,
         resolution=resolution,
-        matrix=distance_matrix(resolution, progress=progress),
+        matrix=matrix,
     )
 
 
@@ -88,7 +179,7 @@ def validate_taxodist_bundle(bundle, check_distances=True):
     distance is also recomputed from the stored lineages; using a bundle in
     ``distance_matrix()`` skips that step.
     """
-    from .distance import distance_matrix
+    from .distance import _distance_matrix_impl
 
     if not isinstance(bundle, TaxodistBundle):
         raise TypeError("bundle must be a TaxodistBundle object")
@@ -103,9 +194,14 @@ def validate_taxodist_bundle(bundle, check_distances=True):
     }
     if not required.issubset(bundle):
         raise ValueError("Invalid TaxodistBundle: required fields are missing")
-    if bundle["schema_version"] != "1.0":
+    if bundle["schema_version"] not in _SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(
             f"Unsupported taxodist bundle schema: {bundle['schema_version']}"
+        )
+    metric, levels = _metric_from_spec(bundle["metric"])
+    if bundle["schema_version"] == "1.0" and metric != "reciprocal":
+        raise ValueError(
+            "Invalid bundle: schema 1.0 supports only the reciprocal metric."
         )
     resolution = bundle["resolution"]
     if not isinstance(resolution, TaxodistResolution):
@@ -116,6 +212,7 @@ def validate_taxodist_bundle(bundle, check_distances=True):
     if not set(resolution["status"]).issubset(allowed):
         raise ValueError("Invalid bundle: unknown resolution status")
 
+    has_ranks = "ranks" in resolution.columns
     for index, row in resolution.reset_index(drop=True).iterrows():
         number = index + 1
         candidates = row["candidates"]
@@ -154,6 +251,18 @@ def validate_taxodist_bundle(bundle, check_distances=True):
                 raise ValueError(f"Invalid bundle: incomplete unresolved record at row {number}")
             if row["status"] == "unresolved" and not candidates.empty:
                 raise ValueError(f"Invalid bundle: unresolved record has candidates at row {number}")
+        # Ranks of a missing lineage are ignored (and written as null).
+        if has_ranks and lineage is not None:
+            ranks = _rank_cell(row["ranks"])
+            if (
+                not isinstance(ranks, (list, tuple))
+                or len(ranks) != len(lineage)
+                or any(rank is not None and not isinstance(rank, str) for rank in ranks)
+            ):
+                raise ValueError(
+                    "Invalid bundle: lineage ranks do not match the lineage "
+                    f"at row {number}"
+                )
 
     matrix = bundle["matrix"]
     if not isinstance(matrix, pd.DataFrame):
@@ -163,7 +272,9 @@ def validate_taxodist_bundle(bundle, check_distances=True):
         raise ValueError("Invalid bundle: matrix labels do not match the resolution inputs")
     if not check_distances:
         return bundle
-    expected = distance_matrix(resolution, progress=False)
+    expected = _distance_matrix_impl(
+        resolution, verbose=False, progress=False, metric=metric, levels=levels
+    )
     if matrix.shape != expected.shape or not np.allclose(
         matrix.to_numpy(dtype=float),
         expected.to_numpy(dtype=float),
@@ -175,6 +286,13 @@ def validate_taxodist_bundle(bundle, check_distances=True):
     return bundle
 
 
+def _rank_cell(value):
+    """A ``ranks`` cell (None, NaN after pandas operations, or a sequence)."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    return value
+
+
 def _portable_value(value):
     if pd.isna(value):
         return None
@@ -184,26 +302,42 @@ def _portable_value(value):
 
 
 def write_taxodist_bundle(bundle, file, pretty=True):
-    """Write a validated bundle using the shared JSON schema version 1.0."""
+    """
+    Write a validated bundle as portable JSON (shared schema, version 1.1).
+
+    The JSON records the metric (``metric.name`` is one of
+    ``inverse_mrca_depth``, ``path_length``, ``wu_palmer``, or
+    ``ranked_path_length``, the latter with ``rank_levels``) and, when the
+    resolution has a ``ranks`` column, the ``lineage_ranks`` of every taxon
+    (null for unranked nodes and for missing lineages).
+    """
     validate_taxodist_bundle(bundle)
+    resolution = bundle["resolution"]
+    has_ranks = "ranks" in resolution.columns
     records = []
-    for row in bundle["resolution"].itertuples(index=False):
-        records.append(
-            {
-                "input": row.input,
-                "resolved_name": (
-                    None if pd.isna(row.resolved_name) else row.resolved_name
-                ),
-                "id": None if pd.isna(row.id) else row.id,
-                "status": row.status,
-                "n_candidates": int(row.n_candidates),
-                "lineage_depth": (
-                    None if pd.isna(row.lineage_depth) else int(row.lineage_depth)
-                ),
-                "lineage": None if row.lineage is None else list(row.lineage),
-                "candidates": row.candidates[["id", "name"]].to_dict("records"),
-            }
-        )
+    for _, row in resolution.iterrows():
+        record = {
+            "input": row["input"],
+            "resolved_name": (
+                None if pd.isna(row["resolved_name"]) else row["resolved_name"]
+            ),
+            "id": None if pd.isna(row["id"]) else row["id"],
+            "status": row["status"],
+            "n_candidates": int(row["n_candidates"]),
+            "lineage_depth": (
+                None if pd.isna(row["lineage_depth"]) else int(row["lineage_depth"])
+            ),
+            "lineage": None if row["lineage"] is None else list(row["lineage"]),
+            "candidates": row["candidates"][["id", "name"]].to_dict("records"),
+        }
+        if has_ranks:
+            ranks = _rank_cell(row["ranks"])
+            # null for a missing lineage; null entries for unranked nodes.
+            record["lineage_ranks"] = (
+                None if row["lineage"] is None or ranks is None
+                else [None if rank is None else str(rank) for rank in ranks]
+            )
+        records.append(record)
     matrix = bundle["matrix"]
     portable = {
         "format": "taxodist_bundle",
@@ -263,7 +397,14 @@ def _parse_matrix(matrix_data):
 
 
 def read_taxodist_bundle(file):
-    """Read and validate a portable bundle written by R, Python, or Julia."""
+    """
+    Read and validate a portable bundle written by R, Python, or Julia.
+
+    Schema versions 1.0 (reciprocal metric only) and 1.1 are supported. The
+    stored distances are recomputed with the stored metric (and rank levels)
+    and must match. The returned matrix records the metric in
+    ``attrs["metric"]``.
+    """
     if not os.path.exists(file):
         raise FileNotFoundError(f"Bundle file not found: {file}")
     try:
@@ -273,7 +414,7 @@ def read_taxodist_bundle(file):
         raise ValueError(f"Could not parse bundle JSON: {error}") from error
     if raw.get("format") != "taxodist_bundle":
         raise ValueError("Invalid bundle JSON: unrecognized format")
-    if raw.get("schema_version") != "1.0":
+    if raw.get("schema_version") not in _SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(
             f"Unsupported taxodist bundle schema: {raw.get('schema_version')}"
         )
@@ -281,30 +422,38 @@ def read_taxodist_bundle(file):
     if not required.issubset(raw):
         raise ValueError("Invalid bundle JSON: required fields are missing")
 
+    with_ranks = any("lineage_ranks" in record for record in raw["taxa"])
     rows = []
     for record in raw["taxa"]:
         candidate_frame = pd.DataFrame(
             record.get("candidates") or [], columns=["id", "name"]
         )
-        rows.append(
-            {
-                "input": record.get("input"),
-                "resolved_name": record.get("resolved_name"),
-                "id": record.get("id"),
-                "status": record.get("status"),
-                "n_candidates": record.get("n_candidates"),
-                "lineage_depth": record.get("lineage_depth"),
-                "lineage": record.get("lineage"),
-                "candidates": candidate_frame,
-            }
-        )
+        row = {
+            "input": record.get("input"),
+            "resolved_name": record.get("resolved_name"),
+            "id": record.get("id"),
+            "status": record.get("status"),
+            "n_candidates": record.get("n_candidates"),
+            "lineage_depth": record.get("lineage_depth"),
+            "lineage": record.get("lineage"),
+            "candidates": candidate_frame,
+        }
+        if with_ranks:
+            ranks = record.get("lineage_ranks")
+            row["ranks"] = (
+                None if ranks is None
+                else [None if rank is None else str(rank) for rank in ranks]
+            )
+        rows.append(row)
     source = raw["source"]
     resolution = _make_resolution(
         rows,
         source=source.get("name"),
         source_url=source.get("url"),
         retrieved_at=source.get("retrieved_at"),
+        ranks=with_ranks,
     )
+    matrix = _parse_matrix(raw["matrix"])
     bundle = TaxodistBundle(
         schema_version=raw["schema_version"],
         created_at=raw["created_at"],
@@ -312,9 +461,11 @@ def read_taxodist_bundle(file):
         software=raw["software"],
         metric=raw["metric"],
         resolution=resolution,
-        matrix=_parse_matrix(raw["matrix"]),
+        matrix=matrix,
     )
-    return validate_taxodist_bundle(bundle)
+    validate_taxodist_bundle(bundle)
+    matrix.attrs["metric"] = _metric_from_spec(raw["metric"])[0]
+    return bundle
 
 
 class TaxodistBundleComparison(dict):

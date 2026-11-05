@@ -289,3 +289,144 @@ correspondence between the three implementations.
 
 * New test modules cover resolution, vectorized matrices, trees, bundle
   comparison, and the persistent cache; coverage remains complete.
+
+# taxodist 1.0.0
+
+First stable release, matching taxodist 1.0.0 for R. The default distance
+metric, the other metrics, and the bundle format (schema 1.1) are now stable:
+later 1.x releases will keep their definitions and continue to read bundles
+written by this version.
+
+## New features (ported from the R package)
+
+* **Ranks.** The rank of every lineage node (e.g. `"Kingdom"`, `"Clade"`,
+  `"Superfamily"`, `"Genus"`) is read from The Taxonomicon and cached with
+  the lineage (`ranks_<id>` / `rawranks_<id>`). The new `lineage_ranks()`
+  returns a DataFrame with columns `node`, `rank` (None when unranked), and
+  `depth`. `taxo_resolve()` results gain a `ranks` column, and
+  `taxo_from_lineages()` accepts user-supplied ranks through `ranks=`.
+* **Distance metrics.** `taxo_distance()`, `distance_matrix()`,
+  `cross_distances()`, `closest_relative()`, `focal_distances()`,
+  `taxo_heatmap()`, and `taxo_bundle()` gain a `metric` argument, also
+  accepted by `taxo_cluster()` and `taxo_ordinate()` through `**kwargs`:
+  `"reciprocal"` (default, unchanged), `"path"`, `"wu_palmer"`, and
+  `"ranked"` (half the path through the standard Linnaean ranks, configurable
+  with `taxodist.distance.RANK_LEVELS`; Clarke and Warwick's step weights).
+  Matrices record the metric in `DataFrame.attrs["metric"]` (the R `dist`
+  `"method"` attribute); `taxo_distance()` results gain a `metric` entry,
+  which `print_taxodist_result()` shows.
+* **Taxonomic distinctness.** `taxo_distinctness()` computes Δ, Δ*, Δ+, Λ+,
+  and SΔ+ for one or more samples; `taxo_distinctness_test()` compares Δ+ and
+  Λ+ of a sample with random draws from a master list (`seed=` for
+  reproducibility) and returns a `TaxodistDistinctnessTest`;
+  `print_taxodist_distinctness()` prints either result. Values equal R's
+  `taxo_distinctness()` (and `vegan::taxondive()`).
+* **Bundle schema 1.1.** Bundles record the metric (and, for `"ranked"`, its
+  `rank_levels`) and the `lineage_ranks` of every taxon (null for unranked
+  nodes and missing lineages). Distances are verified with the stored
+  metric. Schema 1.0 bundles are still read and must use the reciprocal
+  metric. Bundles written by Python are read by R and vice versa for every
+  metric.
+
+## Breaking changes: lineage parsing
+
+* Lineages are now read from the structure of The Taxonomicon page instead of
+  its text. Each node's name is taken from the page's own markup for the
+  scientific name, so author strings, rank labels, extinction and type
+  markers, and vernacular names can no longer leak into, or remove, nodes.
+  Previously many lineages contained malformed nodes such as
+  `"Passeres (C."`, `"Delphinida de"`, or `"Alismatales R.Br. ex"`; because
+  these contained spaces, name-based queries silently dropped them, so lineage
+  depths, and therefore distances, differed from the classification and from
+  ID-based queries. Some clades were also lost entirely (for example
+  `Terrestrornithes` in passerine birds), taxa whose page row is labelled
+  `[plesion]` or `Anamorph genus` were recorded under that label, and the `‡`
+  marker was not removed. **Distances computed with this version can differ
+  from earlier versions.** The parser is identical to the R implementation and
+  is checked against the same trimmed TaxonTree fixtures
+  (`tests/fixtures/expected_lineages.json`).
+* Species are now recorded as nodes of their subspecies, and subgenera
+  (`"Genus (Subgenus)"`) as nodes of their species, when they appear in the
+  lineage of a name-based query.
+* Pages without the structured hierarchy block are still parsed from text,
+  now by extracting the scientific name at the start of each line rather than
+  by deleting author strings. The `[crown]`/`[plesion]`/`[stem]` prefix and
+  rank prefixes use exactly the same rank list as R (a rank must be followed
+  by whitespace), and the cut-off at the page's own taxon is a
+  case-sensitive whole-word match, as in R (it was case-insensitive).
+* The `taxobase` reference dataset was rebuilt from the R package with the new
+  parser.
+
+## Bug fixes
+
+* Taxon names containing regular-expression metacharacters, notably
+  parentheses in subgenus names such as `"Microtus (Agricola)"`, are matched
+  literally, and whole-word matching (ID lookup, `taxo_resolve()`, the text
+  parser) uses Unicode-aware lookarounds instead of `\b`, so it no longer
+  fails next to punctuation.
+* `taxo_resolve()` reports a name whose candidates were all retrieved but are
+  not biological (for example astronomical objects) as `"unresolved"` instead
+  of `"retrieval_error"`; `"retrieval_error"` now means that a candidate
+  lineage could not be retrieved.
+* When a name has several biological entries, entries marked as invalid,
+  rejected, nude, or illegitimate names (`nom. inval.`, `nom. rej.`,
+  `nom. nud.`, `nom. illeg.`) are considered only after the others, in both
+  `get_taxonomicon_id()` and `taxo_resolve()`.
+* `load_cache()` discards lineages from cache files written by earlier
+  versions (with a warning) and keeps their taxon IDs. `save_cache()` records
+  the parser version under `"meta_parser_version"`; the key never enters the
+  session cache.
+* Search results are parsed exactly as in R: the row text is concatenated
+  without separators, only links whose class is exactly `Valid` are used, the
+  astronomical filter no longer includes the extra word `astronomy`, and the
+  `N|T|P|R|B|L` prefix is removed only in its exact form. Candidate
+  descriptions are therefore identical in both implementations.
+
+## Python-specific fixes
+
+* `taxo_cluster()` and `taxo_ordinate()` no longer treat a `TaxodistResolution`
+  (a `DataFrame` subclass) as a distance matrix; resolutions and bundles are
+  passed through `distance_matrix()`, as in R.
+* `get_lineage()` and `get_lineage_by_id()` return copies of cached lineages
+  and cache copies of fetched ones, so modifying a returned list no longer
+  corrupts the cache. `distance_matrix(bundle)` returns a copy of the stored
+  matrix.
+* `check_coverage()`, `closest_relative()` (candidates), `focal_distances()`
+  (community), and `filter_clade()` treat a single string as one taxon instead
+  of iterating over its characters, and accept generators.
+* `get_lineage()` and `get_lineage_by_id()` treat integral numbers, including
+  `50841.0` and NumPy scalars, as Taxonomicon IDs (`"50841"`), as R does.
+* `is_member()` and `filter_clade()` raise `TypeError` for a clade that is not
+  a string; `is_member(taxon, None)` previously matched a node named `"None"`.
+* `distance_matrix()`, `cross_distances()`, and `taxo_tree()` reject
+  dictionaries, as R rejects lists.
+* `focal_distances()` always returns `mrca_depth` as a nullable `Int64`
+  column. `print_focal_distances()` is exported.
+* `plot_taxodist_cluster()` shows the linkage method in its subtitle by
+  default; `taxo_cluster()` records it under `"method"`.
+* `pd.concat()` of resolutions keeps `source` and `source_url` when all inputs
+  agree (and the earliest `retrieved_at`), and leaves them unset otherwise.
+  `taxo_bundle()` assumes The Taxonomicon for a resolution without a source
+  only when every ID is a Taxonomicon ID (the R default); otherwise it raises
+  an error instead of mislabelling the provenance.
+
+## Network
+
+* Consecutive requests to The Taxonomicon are spaced by at least
+  `taxodist.fetch.MIN_INTERVAL` seconds (default 0.25; the R option is
+  `taxodist.min_interval`), so large batches do not overload the server. Set
+  it to 0 to disable.
+
+## Packaging
+
+* matplotlib and seaborn are imported only by the plotting functions and moved
+  to the optional `plot` extra (`pip install "taxodist[plot]"`). SciPy remains
+  a core dependency because `taxo_cluster()` uses it; it is also imported
+  lazily.
+* The bundle JSON schema (`taxodist/schema/taxodist-bundle-v1.schema.json`) is
+  now included in the package.
+* The GPL-3 license text is shipped as `LICENSE` and declared with PEP 639
+  metadata (`license = "GPL-3.0-or-later"`, `license-files`); this requires
+  setuptools >= 77.
+* The version is defined once, in `taxodist/_version.py`. Python 3.8 is no
+  longer supported.

@@ -1,4 +1,5 @@
 import math
+import numbers
 import os
 import re
 import sys
@@ -10,11 +11,18 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
+from bs4.element import NavigableString, Tag, PreformattedString
+import numpy as np
 import pandas as pd
 
 from ._version import __version__
 
 _taxodist_cache = {}
+
+#: Version of the lineage parser. Saved caches record it so that lineages
+#: produced by an older parser are not reused.
+_PARSER_VERSION = 2
+_PARSER_VERSION_KEY = "meta_parser_version"
 
 # Keep one HTTP client for the lifetime of the Python process.  Top-level
 # requests.get() creates a short-lived Session for every call, whereas a
@@ -28,11 +36,18 @@ _http_session.headers.update({"User-Agent": f"taxodist Python package/{__version
 #: (4xx) are not. Set ``taxodist.fetch.MAX_TRIES = 1`` to disable retries.
 MAX_TRIES = 3
 
+#: Minimum interval, in seconds, between consecutive requests to The
+#: Taxonomicon, so that large batches do not overload the server. Set
+#: ``taxodist.fetch.MIN_INTERVAL = 0`` to disable throttling (equivalent of
+#: the R option ``taxodist.min_interval``).
+MIN_INTERVAL = 0.25
+
 _sleep = time.sleep
+_throttle_sleep = time.sleep
+_last_request = None
 
 _ASTRONOMICAL_PATTERN = (
-    r"\bastronomical\b|\bplanet\b|\bMinor planet\b|\bcomet\b|"
-    r"\bastronomy\b|\basteroid\b"
+    r"\bastronomical\b|\bplanet\b|\bMinor planet\b|\bcomet\b|\basteroid\b"
 )
 
 
@@ -44,8 +59,61 @@ def _max_tries():
     return max(tries, 1)
 
 
+def _throttle():
+    """Wait until ``MIN_INTERVAL`` seconds have passed since the last request."""
+    global _last_request
+    interval = MIN_INTERVAL
+    if (
+        isinstance(interval, bool)
+        or not isinstance(interval, numbers.Real)
+        or math.isnan(interval)
+        or interval <= 0
+    ):
+        return None
+    if _last_request is not None:
+        wait = interval - (time.monotonic() - _last_request)
+        if wait > 0:
+            _throttle_sleep(wait)
+    _last_request = time.monotonic()
+    return None
+
+
+def _regex_escape(x):
+    """Escape every regular-expression metacharacter in ``x``."""
+    return re.escape(x)
+
+
+def _word_pattern(x):
+    """
+    Pattern matching ``x`` as a whole word.
+
+    Unicode-aware lookarounds are used instead of ``\\b``, which fails next to
+    non-word characters (e.g. a name ending in ")").
+    """
+    return r"(?<!\w)" + _regex_escape(x) + r"(?!\w)"
+
+
+def _contains_word(text, word, ignore_case=False):
+    flags = re.IGNORECASE if ignore_case else 0
+    return re.search(_word_pattern(word), text, flags) is not None
+
+
+def _candidate_order(descriptions):
+    """
+    Order of homonymous candidates (0-based indices).
+
+    Entries whose search description marks the name as invalid or rejected
+    (e.g. "nom. inval.", "nom. rej.") are moved after the others, keeping the
+    search order within each group.
+    """
+    pattern = re.compile(r"\bnom\.\s*(inval|rej|nud|illeg)\.", re.IGNORECASE)
+    invalid = [bool(pattern.search(str(text))) for text in descriptions]
+    return sorted(range(len(invalid)), key=lambda i: invalid[i])
+
+
 def _http_get(url):
     """GET ``url`` with retries; raise the last RequestException on failure."""
+    _throttle()
     tries = _max_tries()
     for attempt in range(1, tries + 1):
         try:
@@ -72,31 +140,52 @@ def _search_url(taxon):
     )
 
 
+def _trimws(text):
+    """Trim like R's ``trimws()``: only spaces, tabs, and line breaks."""
+    return re.sub(r"^[ \t\r\n]+|[ \t\r\n]+$", "", text)
+
+
+def _class_attr(tag):
+    """The ``class`` attribute of ``tag`` as a single string, or None."""
+    value = tag.get("class")
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return " ".join(value)
+    return str(value)
+
+
 def _parse_search_rows(soup):
-    """Return unique ``{"id", "name"}`` candidates from a TaxonList page."""
+    """
+    Return unique ``{"id", "name"}`` candidates from a TaxonList page.
+
+    Mirrors R's ``.parse_search_rows()``: astronomical homonyms, rows without
+    a TaxonTree link whose class is exactly ``Valid``, and links without a
+    numeric ID are skipped. The row text is concatenated without separators,
+    whitespace is collapsed, and the ``N|T|P|R|B|L`` prefix is removed.
+    """
     results = []
     seen = set()
     for row in soup.find_all("tr"):
-        text = row.get_text(separator=" ", strip=True)
+        text = row.get_text().strip()
         if re.search(_ASTRONOMICAL_PATTERN, text, flags=re.IGNORECASE):
             continue
 
         links = row.find_all("a", href=re.compile(r"TaxonTree"))
-        valid_links = [a for a in links if "Valid" in a.get("class", [])]
+        if not links:
+            continue
+        valid_links = [a for a in links if _class_attr(a) == "Valid"]
         if not valid_links:
             continue
 
         match = re.search(r"id=([0-9]+)", valid_links[0].get("href", ""))
-        if not match or match.group(1) in seen:
+        if not match:
             continue
 
-        text_entry = re.sub(r"\s+", " ", text).strip()
-        text_entry = re.sub(
-            r"^N\s*\|\s*T\s*\|\s*P\s*\|\s*R\s*\|\s*B\s*\|\s*L\s*",
-            "",
-            text_entry,
-            count=1,
-        )
+        text_entry = _trimws(re.sub(r"\s+", " ", text))
+        text_entry = re.sub(r"^N\|T\|P\|R\|B\|L\s*", "", text_entry, count=1)
+        if match.group(1) in seen:
+            continue
         seen.add(match.group(1))
         results.append({"id": match.group(1), "name": text_entry})
     return results
@@ -106,37 +195,321 @@ def _finalize_lineage(lineage, taxon):
     """
     Truncate a name-resolved lineage at the queried taxon.
 
-    Genus-level and higher queries drop nodes containing spaces (species and
-    bracketed rank labels); binomial queries keep only the queried binomial.
-    The taxon is matched exactly first and case-insensitively as a fallback,
-    and appended only when it is absent from the page.
+    Bracketed labels are dropped, and nodes are filtered with
+    ``_keep_lineage_node()``. The taxon is matched exactly first and
+    case-insensitively as a fallback; the lineage is truncated at the last
+    match, and the taxon is appended only when it is absent from the page
+    (e.g. genera whose page links only to their species). Always returns a
+    new list.
     """
-    folded = taxon.casefold()
+    keep, append = _finalize_plan(lineage, taxon)
+    out = [lineage[i] for i in keep]
+    return out + [taxon] if append else out
 
-    def target_indices(nodes):
-        exact = [i for i, node in enumerate(nodes) if node == taxon]
-        if exact:
-            return exact
-        return [i for i, node in enumerate(nodes) if node.casefold() == folded]
 
+def _finalize_ranks(ranks, lineage, taxon):
+    """
+    Apply the truncation of ``_finalize_lineage()`` to a rank list aligned
+    with ``lineage``. An appended taxon receives the rank implied by the form
+    of its name.
+    """
+    keep, append = _finalize_plan(lineage, taxon)
+    out = [ranks[i] for i in keep]
+    return out + [_rank_from_name(taxon)] if append else out
+
+
+def _finalize_plan(lineage, taxon):
+    """
+    Indices (0-based) of ``lineage`` retained by ``_finalize_lineage()``, and
+    whether the queried taxon must be appended.
+    """
+    candidates = [i for i, node in enumerate(lineage) if not node.startswith("[")]
+    keep = _keep_lineage_node([lineage[i] for i in candidates], taxon)
+    candidates = [i for i, kept in zip(candidates, keep) if kept]
+    kept_nodes = [lineage[i] for i in candidates]
+    matches = [k for k, node in enumerate(kept_nodes) if node == taxon]
+    if not matches:
+        folded = taxon.lower()
+        matches = [k for k, node in enumerate(kept_nodes) if node.lower() == folded]
+    if matches:
+        return candidates[:matches[-1] + 1], False
+    return candidates, True
+
+
+def _keep_lineage_node(lineage, taxon):
+    """
+    Nodes without spaces are always kept. A node with spaces (a species,
+    subspecies, or subgenus name) is kept only when it is the queried taxon
+    or one of its name-ancestors: the species of a queried subspecies, or the
+    subgenus ``Genus (Subgenus)`` of a queried species. Other multi-word nodes
+    are descendants of the queried taxon or residual text and are dropped.
+    """
+    plain = [" " not in node for node in lineage]
     if " " not in taxon:
-        lineage = [x for x in lineage if " " not in x and not x.startswith("[")]
-        matches = target_indices(lineage)
-        if matches:
-            return lineage[:matches[-1] + 1]
-    else:
-        lineage = [x for x in lineage if " " not in x or x.casefold() == folded]
-        matches = target_indices(lineage)
-        if matches:
-            return lineage[:matches[0] + 1]
-    return lineage + [taxon]
+        return plain
+    target = taxon.lower()
+    genus = re.sub(r" .*$", "", target, flags=re.DOTALL)
+    keep = []
+    for node, is_plain in zip(lineage, plain):
+        lower = node.lower()
+        is_target = lower == target
+        species_of_target = target.startswith(lower + " ")
+        subgenus_of_target = (
+            re.fullmatch(r"\S+ \([^()]+\)", node) is not None
+            and re.sub(r" .*$", "", lower, flags=re.DOTALL) == genus
+        )
+        keep.append(is_plain or is_target or species_of_target or subgenus_of_target)
+    return keep
 
-_RANK_PREFIXES = (
-    "Clade|Kingdom|Phylum|Superphylum|Subphylum|Infraphylum|Class|Order|"
-    "Suborder|Infraorder|Parvorder|Grandorder|Magnorder|Cohort|Subcohort|"
-    "Legion|Family|Subfamily|Tribe|Subtribe|Genus|Species|Subkingdom|"
-    "Infrakingdom|Superclass|Subclass|Infraclass|Superorder|Superfamily|"
-    "Domain|Superkingdom|Grade|Subgrade|Supergrade"
+
+def _parse_hierarchy(soup):
+    """
+    Parse the classification tree of a TaxonTree page.
+
+    Each row of ``#ctl00_cphTabContent_divHierarchy`` is an <a> (an ancestor)
+    or a <span> (the page's own taxon), followed by a <br>. The taxon name is
+    the text of the row's <b> element. Rows after the page's own taxon are
+    its children and are excluded.
+
+    Returns ``(names, ranks, self_missing)``, or None when the page has no
+    such hierarchy block (the caller then falls back to text parsing). The
+    rank of each row is the text preceding its name (see
+    ``_rank_before_name()``). When the page omits the row of its own taxon,
+    the leading run of strictly increasing indentation is kept and
+    ``self_missing`` is True.
+    """
+    container = soup.select_one("#ctl00_cphTabContent_divHierarchy")
+    if container is None:
+        return None
+
+    names = []
+    ranks = []
+    indents = []
+    is_self = []
+    indent = 0
+
+    def visit(node):
+        nonlocal indent
+        for child in node.children:
+            if isinstance(child, NavigableString):
+                # Comments, CDATA, doctypes, etc. are not text() nodes.
+                if isinstance(child, PreformattedString):
+                    continue
+                indent += str(child).count(" ")
+            elif isinstance(child, Tag):
+                if child.name == "br":
+                    indent = 0
+                elif child.name in ("a", "span"):
+                    row(child)
+                else:
+                    visit(child)
+
+    def row(tag):
+        if _class_attr(tag) in ("Ordinal", "Small"):
+            return
+        bold = tag.find("b")
+        if bold is None:
+            return
+        name = re.sub(r"\s+", " ", _trimws(bold.get_text()))
+        if not name:
+            return
+        names.append(name)
+        ranks.append(_rank_before_name(tag.get_text(), name))
+        indents.append(indent)
+        is_self.append(tag.name == "span")
+
+    visit(container)
+    if not names:
+        return None
+
+    if any(is_self):
+        keep = is_self.index(True) + 1
+        return names[:keep], ranks[:keep], False
+
+    # Some pages (e.g. unverified taxa) omit the row of the page's own taxon.
+    # Keep the leading run of strictly increasing indentation, i.e. the path
+    # from the root, and let the caller append the subject name.
+    keep = 1
+    while keep < len(indents) and indents[keep] > indents[keep - 1]:
+        keep += 1
+    return names[:keep], ranks[:keep], True
+
+
+# -- Ranks ---------------------------------------------------------------------
+
+def _rank_before_name(row_text, name):
+    """
+    Rank of a tree row: the text that precedes the taxon name (e.g.
+    "[crown] Clade", "Superfamily ‡?", "Anamorph genus"), without crown,
+    plesion, or stem qualifiers, extinction and type markers, quotes, or a
+    "Taxon:" caption. Rows without such text are species, subspecies, or
+    subgenera, whose rank is implied by the form of the name.
+    """
+    row_text = re.sub(r"\s+", " ", row_text)
+    pos = row_text.find(name)
+    prefix = row_text[:pos] if pos > 0 else ""
+    return _normalize_rank(prefix, name)
+
+
+def _normalize_rank(prefix, name):
+    prefix = re.sub(r"^.*:", "", prefix, count=1, flags=re.DOTALL)
+    prefix = re.sub(r"\[(crown|plesion|stem)\]", "", prefix)
+    prefix = re.sub('[†‡ᵀ?"]', "", prefix)
+    prefix = _trimws(re.sub(r"\s+", " ", prefix))
+    return prefix if prefix else _rank_from_name(name)
+
+
+def _rank_from_name(name):
+    """
+    Rank implied by the form of a scientific name: "Genus (Subgenus)" is a
+    subgenus, a binomial a species, and a trinomial a subspecies. Uninomials
+    carry no rank information (None).
+    """
+    if re.fullmatch(r"\S+ \([^()]+\)", name):
+        return "Subgenus"
+    words = len(_trimws(name).split())
+    if words == 2:
+        return "Species"
+    if words == 3:
+        return "Subspecies"
+    return None
+
+
+def _lineage_from_page(soup, taxon_id):
+    """
+    Extract the raw lineage (before trimming at Biota) of a TaxonTree page.
+
+    Uses the structured hierarchy block when present and falls back to text
+    parsing otherwise. Repeated names are collapsed to their first occurrence.
+    """
+    return _lineage_and_ranks_from_page(soup, taxon_id)[0]
+
+
+def _lineage_and_ranks_from_page(soup, taxon_id):
+    """
+    Like ``_lineage_from_page()``, but returns ``(lineage, ranks)`` where
+    ``ranks`` holds the rank of every node (None when it has none). This is
+    the equivalent of the "ranks" attribute of R's ``.lineage_from_page()``.
+    """
+    subject = soup.select_one("#ctl00_divSubject b")
+    current_name = None
+    if subject is not None:
+        current_name = _trimws(re.sub("[†‡ᵀ?]", "", subject.get_text().strip()))
+
+    structured = _parse_hierarchy(soup)
+    if structured is not None:
+        lineage, ranks, self_missing = structured
+        if self_missing and current_name and lineage[-1] != current_name:
+            subject_text = soup.select_one("#ctl00_divSubject").get_text()
+            lineage = lineage + [current_name]
+            ranks = ranks + [_rank_before_name(subject_text, current_name)]
+    else:
+        lineage, ranks = _parse_lineage_text(soup, current_name, taxon_id)
+    seen = set()
+    out_lineage, out_ranks = [], []
+    for node, rank in zip(lineage, ranks):
+        if node in seen:
+            continue
+        seen.add(node)
+        out_lineage.append(node)
+        out_ranks.append(rank)
+    return out_lineage, out_ranks
+
+
+def _parse_lineage_text(soup, current_name, taxon_id):
+    """
+    Fallback parser for pages without the structured hierarchy block.
+
+    The tree is read as plain text, one node per line, and rank prefixes,
+    markers, and author strings are removed with regular expressions.
+    Returns ``(lineage, ranks)``.
+    """
+    content = soup.select_one("#divPageContent")
+    if current_name is not None and content is not None:
+        tree_text = content.get_text().strip()
+        raw_lines = [_trimws(line) for line in tree_text.split("\n")]
+        raw_lines = [line for line in raw_lines if line]
+        tree_start = next(
+            (i for i, line in enumerate(raw_lines) if line.startswith("Natura")),
+            None,
+        )
+        if tree_start is not None:
+            raw_lines = raw_lines[tree_start:]
+        pattern = re.compile(_word_pattern(current_name))
+        cutoff = next(
+            (
+                i for i, line in enumerate(raw_lines)
+                if pattern.search(re.sub("[†ᵀ]", "", line))
+            ),
+            None,
+        )
+        texts = raw_lines[:cutoff + 1] if cutoff is not None else raw_lines
+    else:
+        links = soup.find_all("a", href=re.compile(r"TaxonTree"))
+        links = [a for a in links if re.search(r"id=[0-9]", a.get("href", ""))]
+        own_pattern = re.compile(f"id={re.escape(str(taxon_id))}($|&)")
+        own_idx = [
+            i for i, a in enumerate(links) if own_pattern.search(a.get("href", ""))
+        ]
+        if own_idx:
+            links = links[:max(own_idx) + 1]
+        texts = [a.get_text().strip() for a in links]
+
+    lineage, ranks = [], []
+    for text in texts:
+        node = _clean_lineage_label(text)
+        if (
+            node is None
+            or node in _BARE_RANKS
+            or node == ""
+            or re.match(r"^\s*$", node)
+            or node.startswith('"')
+            or node.startswith("Population")
+        ):
+            continue
+        rank = _text_rank(text)
+        lineage.append(node)
+        ranks.append(rank if rank is not None else _rank_from_name(node))
+    return lineage, ranks
+
+
+def _text_rank(raw_text):
+    """Rank label at the start of a plain-text tree line, or None."""
+    marked = re.sub("[†‡ᵀ]", "", str(raw_text))
+    marked = re.sub(r"^\?\s*", "", marked, count=1)
+    match = _TEXT_RANK_PATTERN.match(marked)
+    return match.group(1) if match else None
+
+
+_RANK_ALTERNATIVES = "|".join([
+    "Superdomain", "Domain", "Superkingdom", "Kingdom", "Subkingdom",
+    "Infrakingdom", "Superphylum", "Phylum", "Subphylum", "Infraphylum",
+    "Superclass", "Class", "Subclass", "Infraclass", "Supercohort", "Cohort",
+    "Subcohort", "Magnorder", "Grandorder", "Superorder", "Order", "Suborder",
+    "Infraorder", "Parvorder", "Legion", "Superfamily", "Family", "Subfamily",
+    "Tribe", "Subtribe", "Genus", "Species", "Subspecies", "Clade",
+    "Supergrade", "Grade", "Subgrade",
+])
+
+_TEXT_RANK_PATTERN = re.compile(
+    r"^(?:\[(?:crown|plesion|stem)\]\s+)?"
+    r"(Anamorph\s+\w+|" + _RANK_ALTERNATIVES + r")\s+"
+)
+
+# Lower-case words that start an author string rather than continue a
+# scientific name (e.g. "de Blainville", "van der Hoeven", "R.Br. ex").
+_AUTHOR_PARTICLES = [
+    "de", "del", "della", "des", "di", "do", "dos", "da", "das", "du", "d",
+    "van", "von", "der", "den", "ter", "zu", "zur", "la", "le", "les", "ex",
+    "in", "et", "al", "auct", "sensu", "nom", "non", "emend", "corrig", "ms",
+    "pro", "sp", "spp", "var", "nec", "fide",
+]
+
+_SCIENTIFIC_NAME_PATTERN = re.compile(
+    r"^[^\s\",\[(]+"
+    r"(?:\s(?!(?:" + "|".join(_AUTHOR_PARTICLES) + r")(?![\w'’-]))"
+    r"[a-zà-ÿ][\w-]*(?![\w.'’]))"
+    r"{0,2}"
 )
 
 _BARE_RANKS = {
@@ -148,32 +521,43 @@ _BARE_RANKS = {
 }
 
 
+def _extract_scientific_name(x):
+    """
+    Keep only the scientific name at the start of a cleaned tree line.
+
+    The first word (a uninomial, possibly hyphenated) is kept, followed by up
+    to two lower-case epithets for species and subspecies. Author names,
+    years, vernacular names and annotations that follow are discarded.
+    Quoted and bracketed lines are returned unchanged so the caller's filters
+    can recognise them. ``None`` is returned unchanged; a list or tuple is
+    processed element-wise.
+    """
+    if isinstance(x, (list, tuple)):
+        return [_extract_scientific_name(item) for item in x]
+    if x is None or re.match(r"^[\"\[(]", x):
+        return x
+    match = _SCIENTIFIC_NAME_PATTERN.match(x)
+    return match.group(0) if match else x
+
+
 def _clean_lineage_label(raw_text):
     """Apply the same lineage-label cleaning sequence as taxodist for R."""
-    text = re.sub(r"[\u2020\u1D40]", "", str(raw_text))
-    text = re.sub(r"\s+", " ", text).strip()
+    if raw_text is None:
+        return None
+    text = re.sub("[†‡ᵀ]", "", str(raw_text))
+    text = re.sub(r"^\?\s*", "", text, count=1)
     text = re.sub(
-        rf"^\[crown\]\s+({_RANK_PREFIXES})?\s*",
+        r"^\[(crown|plesion|stem)\]\s+(?:(?:" + _RANK_ALTERNATIVES + r")\s+)?",
         "",
         text,
+        count=1,
     )
-    text = re.sub(rf"^({_RANK_PREFIXES}) ", "", text)
     text = re.sub(
-        r"\s+[A-Z][a-záàâãéèêíïóôõöúüç].*$",
-        "",
-        text,
+        r"^(?:Anamorph\s+\w+|" + _RANK_ALTERNATIVES + r")\s+", "", text, count=1
     )
-    text = re.sub(r"\s+[A-Z]\.[A-Z]\..*$", "", text)
-    text = re.sub(r"\s+auct\..*$", "", text)
-    text = re.sub(r"\s+von.*$", "", text)
-    text = re.sub(r"\s+\([A-Z][a-z].*$", "", text)
-    text = re.sub(r"\s+\(\d{4}\).*$", "", text)
-    text = re.sub(r"\s+\[.*$", "", text)
-    text = re.sub(r"\s+[A-Z]\.$", "", text)
-    text = re.sub(r"\s+\([a-z].*$", "", text)
-    text = re.sub(r'\s+".*$', "", text)
-    text = re.sub(r'^".*', "", text)
-    return text.strip()
+    text = re.sub("[†‡?]", "", text)
+    text = text.strip()
+    return _extract_scientific_name(text)
 
 
 def clear_cache():
@@ -239,9 +623,11 @@ def save_cache(file=None):
     if file is None:
         file = _default_cache_file()
         os.makedirs(os.path.dirname(file), exist_ok=True)
+    data = dict(_taxodist_cache)
+    data[_PARSER_VERSION_KEY] = _PARSER_VERSION
     with open(file, 'wb') as f:
-        pickle.dump(dict(_taxodist_cache), f, protocol=pickle.HIGHEST_PROTOCOL)
-    print(f"Cache saved to '{file}' ({len(_taxodist_cache)} entries).")
+        pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"Cache saved to '{file}' ({len(data)} entries).")
     return file
 
 
@@ -299,6 +685,35 @@ def load_cache(file=None):
                     "Invalid cache file: resolved lineage entries must be sequences of strings."
                 )
 
+    # Lineages saved by an older parser may contain malformed nodes. Taxon IDs
+    # remain valid, so only those are restored from such a cache.
+    data = dict(data)
+    parser_version = data.pop(_PARSER_VERSION_KEY, None)
+    current = (
+        isinstance(parser_version, numbers.Real)
+        and not isinstance(parser_version, bool)
+        and not math.isnan(parser_version)
+        and parser_version >= _PARSER_VERSION
+    )
+    if not current:
+        kept = {key: value for key, value in data.items() if key.startswith("id_")}
+        n_dropped = len(data) - len(kept)
+        data = kept
+        if n_dropped > 0:
+            entries = "entry was" if n_dropped == 1 else "entries were"
+            warnings.warn(
+                "The cache was written by an older version of taxodist. "
+                f"{n_dropped} lineage {entries} discarded and will be retrieved "
+                "again; taxon IDs were kept.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    # Store lineages as fresh lists so the loaded object is not shared.
+    data = {
+        key: list(value) if isinstance(value, (list, tuple)) else value
+        for key, value in data.items()
+    }
     # Modify the active cache only after the complete file has been validated.
     _taxodist_cache.update(data)
     print(f"Cache loaded from '{file}' ({len(data)} entries).")
@@ -442,13 +857,17 @@ def _lookup_taxonomicon_id(taxon, verbose=False):
 
     if len(bio_ids) > 1:
         # Prefer candidates whose lineage contains the name as a distinct word.
-        word_pattern = re.compile(rf"\b{re.escape(taxon)}\b", re.IGNORECASE)
         matched = [
             entry for entry in bio_ids
-            if any(word_pattern.search(node) for node in entry["lineage"])
+            if any(
+                _contains_word(node, taxon, ignore_case=True)
+                for node in entry["lineage"]
+            )
         ]
         if matched:
             bio_ids = matched
+        preferred = _candidate_order([entry["name"] for entry in bio_ids])
+        bio_ids = [bio_ids[i] for i in preferred]
 
     if not bio_ids:
         if lineage_failed:
@@ -514,11 +933,10 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
     Cleaned and uncleaned lineages are cached separately, so the value of
     ``clean`` used in an earlier call never affects later calls.
     """
-    if isinstance(taxon_id, (list, tuple, set, frozenset)):
-        raise TypeError("taxon_id must be a single ID, not a collection of IDs")
+    taxon_id = _id_string(taxon_id, "taxon_id must be a single ID, not a collection of IDs")
     if taxon_id is None:
         return None
-    taxon_id = str(taxon_id).strip()
+    taxon_id = taxon_id.strip()
     if not re.fullmatch(r"[0-9]+", taxon_id):
         return None
 
@@ -529,7 +947,8 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
     if cache_key in _taxodist_cache:
         if verbose:
             print(f"Using cached lineage for ID {taxon_id}")
-        return _taxodist_cache[cache_key]
+        # Return a copy so that callers cannot modify the cached lineage.
+        return list(_taxodist_cache[cache_key])
 
     url = f"http://taxonomicon.taxonomy.nl/TaxonTree.aspx?id={taxon_id}&src=0"
     try:
@@ -549,78 +968,86 @@ def get_lineage_by_id(taxon_id, clean=True, verbose=False):
         if verbose:
             print(f"Could not parse lineage for ID {taxon_id}")
         return None
-    subject_node = soup.select_one("#ctl00_divSubject b")
-    content_node = soup.select_one("#divPageContent")
-    
-    current_name = subject_node.get_text(strip=True) if subject_node else None
-    
-    use_text_parsing = False
-    texts = []
-    
-    if current_name and content_node:
-        tree_text = content_node.get_text()
-        raw_lines = [line.strip() for line in tree_text.split("\n")]
-        raw_lines = [line for line in raw_lines if line]
-        
-        # Locate where tree starts (Natura)
-        tree_start_idx = None
-        for idx, line in enumerate(raw_lines):
-            if line.startswith("Natura"):
-                tree_start_idx = idx
-                break
-        
-        if tree_start_idx is not None:
-            raw_lines = raw_lines[tree_start_idx:]
-            
-        # Clean daggers for indexing safety
-        raw_lines_search = [re.sub(r"[\u2020\u1D40†]", "", line) for line in raw_lines]
-        
-        # Cut off raw lines once the current name is matched as a distinct word
-        word_pattern = rf"\b{re.escape(current_name)}\b"
-        cutoff_idx = None
-        for idx, line in enumerate(raw_lines_search):
-            if re.search(word_pattern, line, flags=re.IGNORECASE):
-                cutoff_idx = idx
-                break
-                
-        if cutoff_idx is not None:
-            texts = raw_lines[:cutoff_idx + 1]
-            use_text_parsing = True
-        else:
-            texts = raw_lines
-            use_text_parsing = True
-            
-    if not use_text_parsing:
-        # Fallback to your robust link-based extraction method
-        links = soup.find_all("a", href=re.compile(r"TaxonTree"))
-        hrefs_all = [a.get("href", "") for a in links]
-        valid_links = [a for a, h in zip(links, hrefs_all) if re.search(r"id=[0-9]", h)]
-        hrefs_all = [h for h in hrefs_all if re.search(r"id=[0-9]", h)]
 
-        hrefs = [a.get("href", "") for a in valid_links]
-        own_pattern = f"id={taxon_id}(&|$)"
-        
-        own_idx = [i for i, h in enumerate(hrefs) if re.search(own_pattern, h)]
-        if own_idx:
-            valid_links = valid_links[:max(own_idx) + 1]
-            
-        texts = [a.get_text(separator=" ", strip=True) for a in valid_links]
-
-    lineage = [_clean_lineage_label(raw_text) for raw_text in texts]
-    lineage = [x for x in lineage if x not in _BARE_RANKS]
-    lineage =[x for x in lineage if x != "" and not re.match(r"^\s*$", x)]
-    lineage = [x for x in lineage if not x.startswith('"')]
-    lineage = [x for x in lineage if not x.startswith("Population")]
-    
-    lineage = list(dict.fromkeys(lineage))
+    lineage, ranks = _lineage_and_ranks_from_page(soup, taxon_id)
     if not lineage:
         return None
 
-    # One request serves both variants, so cache both.
-    cleaned = lineage[lineage.index("Biota"):] if "Biota" in lineage else list(lineage)
-    _taxodist_cache[raw_key] = lineage
-    _taxodist_cache[clean_key] = cleaned
+    # One request serves both variants, so cache both (as private copies),
+    # with their ranks.
+    start = lineage.index("Biota") if "Biota" in lineage else 0
+    cleaned = lineage[start:]
+    _taxodist_cache[raw_key] = list(lineage)
+    _taxodist_cache[clean_key] = list(cleaned)
+    _taxodist_cache[f"rawranks_{taxon_id}"] = list(ranks)
+    _taxodist_cache[f"ranks_{taxon_id}"] = list(ranks[start:])
     return cleaned if clean else lineage
+
+
+def _format_taxon_id(taxon_id):
+    """Taxon ID as the string used in cache keys."""
+    value = _id_string(taxon_id, "taxon_id must be a single ID, not a collection of IDs")
+    return "" if value is None else value.strip()
+
+
+def _ranks_by_id(taxon_id, clean=True, verbose=False):
+    """
+    Ranks aligned with ``get_lineage_by_id(taxon_id, clean)``. Lineages cached
+    without ranks (e.g. restored from a cache file of an older version) are
+    retrieved again.
+    """
+    lineage = get_lineage_by_id(taxon_id, clean=clean, verbose=verbose)
+    if lineage is None:
+        return None
+    taxon_id = _format_taxon_id(taxon_id)
+    key = f"{'ranks_' if clean else 'rawranks_'}{taxon_id}"
+    if key not in _taxodist_cache:
+        _taxodist_cache.pop(f"lin_{taxon_id}", None)
+        _taxodist_cache.pop(f"rawlin_{taxon_id}", None)
+        lineage = get_lineage_by_id(taxon_id, clean=clean, verbose=verbose)
+        if lineage is None or key not in _taxodist_cache:
+            return None
+    ranks = _taxodist_cache[key]
+    if len(ranks) != len(lineage):
+        return [None] * len(lineage)
+    return list(ranks)
+
+
+def _cached_ranks(taxon_id, lineage):
+    """
+    Cached ranks of a cleaned lineage, without any network request. Returns
+    None ranks when none are cached or they do not align with ``lineage``.
+    """
+    ranks = _taxodist_cache.get(f"ranks_{_format_taxon_id(taxon_id)}")
+    if ranks is not None and len(ranks) == len(lineage):
+        return list(ranks)
+    return [None] * len(lineage)
+
+
+def _id_string(value, collection_message):
+    """
+    Convert a scalar taxon or ID to a string as R's ``as.character()`` does.
+
+    Integral numbers (including integral floats and NumPy scalars) are
+    formatted as integers, so ``50841.0`` becomes ``"50841"``. Missing values
+    return None; collections raise TypeError.
+    """
+    if isinstance(value, (list, tuple, set, frozenset, dict, np.ndarray, pd.Series)):
+        raise TypeError(collection_message)
+    if value is None:
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        return str(value)
+    if isinstance(value, numbers.Integral):
+        return str(int(value))
+    if isinstance(value, numbers.Real):
+        value = float(value)
+        if math.isnan(value):
+            return None
+        if math.isfinite(value) and value.is_integer():
+            return str(int(value))
+        return repr(value)
+    return str(value)
 
 def get_lineage(taxon, clean=True, verbose=False):
     """
@@ -635,7 +1062,8 @@ def get_lineage(taxon, clean=True, verbose=False):
     taxon : str or int
         A single taxon name or numeric Taxonomicon ID. Leading, trailing, and
         repeated internal whitespace is ignored, and the queried name is
-        matched case-insensitively when truncating the lineage.
+        matched case-insensitively when truncating the lineage. Integral
+        numbers (e.g. ``50841`` or ``50841.0``) are treated as IDs.
     clean : bool
         Logical. If True (default), removes philosophical root nodes
         and cleans formatting markers.
@@ -646,11 +1074,11 @@ def get_lineage(taxon, clean=True, verbose=False):
     -------
     list or None
         A character vector of clade names ordered from root to tip, or
-        None if the taxon cannot be found.
+        None if the taxon cannot be found. The list is a new object; changing
+        it does not affect the cache.
     """
-    if isinstance(taxon, (list, tuple, set, frozenset)):
-        raise TypeError("taxon must be a single taxon name or ID")
-    if taxon is None or (isinstance(taxon, float) and math.isnan(taxon)):
+    taxon = _id_string(taxon, "taxon must be a single taxon name or ID")
+    if taxon is None:
         return None
     taxon_str = _normalize_taxon(taxon)
     if not taxon_str:
@@ -681,6 +1109,68 @@ def get_lineage(taxon, clean=True, verbose=False):
     lineage = _finalize_lineage(lineage, taxon_str)
     _taxodist_cache[resolved_key] = list(lineage)
     return lineage
+
+
+def lineage_ranks(taxon, clean=True, verbose=False):
+    """
+    Retrieve the ranks of the nodes in a lineage
+
+    Returns each node of the lineage of a taxon together with its rank in The
+    Taxonomicon classification (for example "Kingdom", "Clade",
+    "Superfamily", or "Genus"). The nodes are exactly those returned by
+    get_lineage() for the same arguments.
+
+    Parameters
+    ----------
+    taxon : str or int
+        A single taxon name or numeric Taxonomicon ID (as in get_lineage()).
+    clean : bool
+        If True (default), removes philosophical root nodes above Biota.
+    verbose : bool
+        If True, prints progress messages. Default False.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        Columns ``node``, ``rank``, and ``depth`` (1-based), one row per
+        lineage node from root to tip, or None if the taxon cannot be found.
+        ``rank`` is None for nodes without a stated rank (such as the
+        philosophical root nodes above Biota).
+
+    Notes
+    -----
+    Ranks are read from the label that precedes each name in the
+    classification, without the ``[crown]``, ``[plesion]``, and ``[stem]``
+    qualifiers or extinction markers. Rows without a label are species,
+    subspecies, or subgenera, whose rank is inferred from the form of the
+    name. Many nodes are unranked clades ("Clade"). Ranks are used by the
+    ``"ranked"`` distance metric; see taxo_distance().
+    """
+    taxon = _id_string(taxon, "taxon must be a single taxon name or ID")
+    if taxon is None:
+        return None
+    taxon_str = _normalize_taxon(taxon)
+    if not taxon_str:
+        return None
+    is_id = bool(re.fullmatch(r"[0-9]+", taxon_str))
+    id_val = taxon_str if is_id else get_taxonomicon_id(taxon_str, verbose=verbose)
+    if id_val is None:
+        return None
+
+    ranks = _ranks_by_id(id_val, clean=clean, verbose=verbose)
+    lineage = get_lineage_by_id(id_val, clean=clean, verbose=verbose)
+    if ranks is None or lineage is None:
+        return None
+    if not is_id:
+        ranks = _finalize_ranks(ranks, lineage, taxon_str)
+        lineage = _finalize_lineage(lineage, taxon_str)
+    return pd.DataFrame(
+        {
+            "node": pd.Series(lineage, dtype="object"),
+            "rank": pd.Series(ranks, dtype="object"),
+            "depth": np.arange(1, len(lineage) + 1, dtype=np.int64),
+        }
+    )
 
 
 def _taxo_search_details(taxon, verbose=False):
@@ -778,6 +1268,24 @@ class TaxodistResolution(pd.DataFrame):
     def _constructor(self):
         return TaxodistResolution
 
+    def __finalize__(self, other, method=None, **kwargs):
+        result = super().__finalize__(other, method=method, **kwargs)
+        if method == "concat":
+            # pandas does not propagate _metadata through pd.concat(). Keep
+            # the provenance only when every concatenated resolution agrees
+            # on it; otherwise leave it unset so that taxo_bundle() cannot
+            # silently mislabel the combined table.
+            objs = list(getattr(other, "objs", None) or [])
+            if objs and all(isinstance(obj, TaxodistResolution) for obj in objs):
+                for name in ("source", "source_url"):
+                    values = [getattr(obj, name, None) for obj in objs]
+                    same = all(value == values[0] for value in values)
+                    object.__setattr__(result, name, values[0] if same else None)
+                times = [getattr(obj, "retrieved_at", None) for obj in objs]
+                earliest = None if any(t is None for t in times) else min(times)
+                object.__setattr__(result, "retrieved_at", earliest)
+        return result
+
     def summary_counts(self):
         counts = self["status"].value_counts()
         return {
@@ -791,8 +1299,25 @@ class TaxodistResolution(pd.DataFrame):
         }
 
 
-def _make_resolution(rows, source, source_url, retrieved_at=None):
-    frame = TaxodistResolution(rows, columns=RESOLUTION_COLUMNS)
+def _make_resolution(rows, source, source_url, retrieved_at=None, ranks=True):
+    """
+    Build a TaxodistResolution from row dictionaries. With ``ranks=True`` the
+    optional ``ranks`` column (lineage ranks, aligned with ``lineage``) is
+    included; rows without a ``ranks`` entry receive None.
+    """
+    columns = RESOLUTION_COLUMNS + (["ranks"] if ranks else [])
+    rows = list(rows)
+    frame = TaxodistResolution(rows, columns=columns)
+    if ranks:
+        # Lists must be assigned element-wise to keep one list per cell.
+        frame["ranks"] = pd.Series(
+            [
+                None if row.get("ranks") is None else list(row["ranks"])
+                for row in rows
+            ],
+            index=frame.index,
+            dtype="object",
+        )
     for column in ("input", "resolved_name", "id", "status"):
         frame[column] = frame[column].astype("object")
         frame.loc[frame[column].isna(), column] = None
@@ -822,6 +1347,14 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
         resolves many cross-kingdom homonyms automatically. Matching is exact
         and case-insensitive. Names without a candidate inside the clade are
         reported as ``"unresolved"``. Numeric IDs are not filtered.
+
+    Returns
+    -------
+    TaxodistResolution
+        One row per input with columns input, resolved_name, id, status,
+        n_candidates, lineage_depth, lineage, candidates, and ranks (the rank
+        of every lineage node, aligned with ``lineage``; None for unresolved
+        inputs and for nodes without a rank).
 
     Notes
     -----
@@ -853,6 +1386,7 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
             "lineage_depth": None,
             "lineage": None,
             "candidates": candidates,
+            "ranks": None,
         }
 
     def resolve_one(taxon):
@@ -870,6 +1404,7 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
                 "lineage_depth": len(lineage),
                 "lineage": list(lineage),
                 "candidates": pd.DataFrame([{"id": taxon, "name": name}]),
+                "ranks": _cached_ranks(taxon, lineage),
             }
 
         search = _taxo_search_details(taxon, verbose=verbose)
@@ -884,6 +1419,7 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
             get_lineage_by_id(identifier, clean=True, verbose=verbose)
             for identifier in candidates["id"]
         ]
+        retrieved = [lineage is not None for lineage in candidate_lineages]
         valid = [
             lineage is not None and "Biota" in lineage
             for lineage in candidate_lineages
@@ -893,6 +1429,13 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
             lineage for lineage, keep in zip(candidate_lineages, valid) if keep
         ]
         if candidates.empty:
+            # Only a failed lineage retrieval is a retrieval error; candidates
+            # that were retrieved but are not biological (e.g. astronomical
+            # objects) mean the name is simply not a taxon.
+            # As for names outside `within`, an unresolved record carries no
+            # candidates (bundle validation requires this).
+            if all(retrieved):
+                return failed(taxon, "unresolved")
             return failed(taxon, "retrieval_error", searched_candidates)
 
         if within_clade is not None:
@@ -908,9 +1451,8 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
             ]
 
         if len(candidates) > 1:
-            pattern = re.compile(rf"\b{re.escape(taxon)}\b", re.IGNORECASE)
             exact = [
-                any(pattern.search(node) for node in lineage)
+                any(_contains_word(node, taxon, ignore_case=True) for node in lineage)
                 for lineage in candidate_lineages
             ]
             if any(exact):
@@ -920,10 +1462,18 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
                     for lineage, keep in zip(candidate_lineages, exact)
                     if keep
                 ]
+            preferred = _candidate_order(list(candidates["name"]))
+            candidates = candidates.iloc[preferred].reset_index(drop=True)
+            candidate_lineages = [candidate_lineages[i] for i in preferred]
 
         # Apply the same truncation as get_lineage() so that name-based and
         # resolution-based matrices are identical.
         selected_lineage = _finalize_lineage(list(candidate_lineages[0]), taxon)
+        selected_ranks = _finalize_ranks(
+            _cached_ranks(candidates.iloc[0]["id"], candidate_lineages[0]),
+            candidate_lineages[0],
+            taxon,
+        )
         return {
             "input": taxon,
             "resolved_name": selected_lineage[-1],
@@ -933,6 +1483,7 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
             "lineage_depth": len(selected_lineage),
             "lineage": selected_lineage,
             "candidates": candidates.copy(),
+            "ranks": selected_ranks,
         }
 
     keys = [_normalize_taxon(taxon) for taxon in taxa]
@@ -971,8 +1522,26 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
     return result
 
 
-def taxo_from_lineages(lineages, ids=None, source="user-supplied"):
-    """Create an auditable offline resolution from root-to-tip lineages."""
+def taxo_from_lineages(lineages, ids=None, source="user-supplied", ranks=None):
+    """
+    Create an auditable offline resolution from root-to-tip lineages.
+
+    Parameters
+    ----------
+    lineages : dict
+        Mapping from input label to the lineage (a sequence of node names
+        ordered from root to the focal taxon).
+    ids : sequence or dict of str, optional
+        One unique identifier per lineage (matched by label when a dict).
+        Defaults to ``"custom:<label>"``.
+    source : str
+        Description of the lineage source.
+    ranks : dict or sequence, optional
+        The rank of every node of every lineage (None for unranked nodes), as
+        a dict keyed by label or a sequence matched by position. Ranks are
+        required only by the ``"ranked"`` distance metric. When omitted,
+        every rank is None.
+    """
     if not isinstance(lineages, dict):
         raise TypeError("lineages must be a dictionary with unique, non-empty names")
     labels = list(lineages)
@@ -1012,8 +1581,37 @@ def taxo_from_lineages(lineages, ids=None, source="user-supplied"):
             "ids must contain one unique, non-empty identifier per lineage"
         )
 
+    if ranks is None:
+        rank_lists = [[None] * len(lineages[label]) for label in labels]
+    else:
+        if isinstance(ranks, Mapping):
+            if not all(label in ranks for label in labels):
+                raise ValueError("Named ranks must contain every lineage name")
+            rank_lists = [ranks[label] for label in labels]
+        elif isinstance(ranks, (list, tuple)):
+            rank_lists = list(ranks)
+        else:
+            raise TypeError(
+                "ranks must be a dictionary or list of rank sequences"
+            )
+
+        def valid(entry, lineage):
+            return (
+                isinstance(entry, (list, tuple))
+                and len(entry) == len(lineage)
+                and all(rank is None or isinstance(rank, str) for rank in entry)
+            )
+
+        if len(rank_lists) != len(labels) or not all(
+            valid(entry, lineages[label]) for entry, label in zip(rank_lists, labels)
+        ):
+            raise ValueError(
+                "ranks must give one rank (or None) per node of every lineage"
+            )
+        rank_lists = [list(entry) for entry in rank_lists]
+
     rows = []
-    for label, identifier in zip(labels, identifiers):
+    for label, identifier, node_ranks in zip(labels, identifiers, rank_lists):
         lineage = list(lineages[label])
         resolved_name = lineage[-1]
         rows.append(
@@ -1028,6 +1626,7 @@ def taxo_from_lineages(lineages, ids=None, source="user-supplied"):
                 "candidates": pd.DataFrame(
                     [{"id": identifier, "name": resolved_name}]
                 ),
+                "ranks": node_ranks,
             }
         )
     return _make_resolution(rows, source=source, source_url=None)

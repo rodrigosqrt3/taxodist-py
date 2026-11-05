@@ -1,0 +1,189 @@
+{
+  "format": "taxodist_bundle",
+  "schema_version": "1.1",
+  "created_at": "2026-11-03 18:29:20 UTC",
+  "source": {
+    "name": "user-supplied",
+    "url": null,
+    "retrieved_at": "2026-11-03 18:29:19 UTC"
+  },
+  "software": {
+    "name": "taxodist",
+    "version": "0.9.0.9000",
+    "language": "R"
+  },
+  "metric": {
+    "name": "ranked_path_length",
+    "definition": "Half the path length between the lineages reduced to the root, the nodes whose rank is one of rank_levels, and the terminal node",
+    "root_depth": 1,
+    "common_ancestor": "continuous common lineage prefix",
+    "rank_levels": ["kingdom", "phylum", "class", "order", "family", "genus", "species"]
+  },
+  "taxa": [
+    {
+      "input": "A",
+      "resolved_name": "A",
+      "id": "custom:A",
+      "status": "resolved",
+      "n_candidates": 1,
+      "lineage_depth": 8,
+      "lineage": ["Biota", "Animalia", "Chordata", "Mammalia", "Carnivora", "Felidae", "Panthera", "A"],
+      "candidates": [
+        {
+          "id": "custom:A",
+          "name": "A"
+        }
+      ],
+      "lineage_ranks": [
+        null,
+        "Kingdom",
+        "Phylum",
+        "Class",
+        "Order",
+        "Family",
+        "Genus",
+        "Species"
+      ]
+    },
+    {
+      "input": "B",
+      "resolved_name": "B",
+      "id": "custom:B",
+      "status": "resolved",
+      "n_candidates": 1,
+      "lineage_depth": 8,
+      "lineage": ["Biota", "Animalia", "Chordata", "Mammalia", "Carnivora", "Felidae", "Panthera", "B"],
+      "candidates": [
+        {
+          "id": "custom:B",
+          "name": "B"
+        }
+      ],
+      "lineage_ranks": [
+        null,
+        "Kingdom",
+        "Phylum",
+        "Class",
+        "Order",
+        "Family",
+        "Genus",
+        "Species"
+      ]
+    },
+    {
+      "input": "C",
+      "resolved_name": "C",
+      "id": "custom:C",
+      "status": "resolved",
+      "n_candidates": 1,
+      "lineage_depth": 8,
+      "lineage": ["Biota", "Animalia", "Chordata", "Mammalia", "Carnivora", "Canidae", "Canis", "C"],
+      "candidates": [
+        {
+          "id": "custom:C",
+          "name": "C"
+        }
+      ],
+      "lineage_ranks": [
+        null,
+        "Kingdom",
+        "Phylum",
+        "Class",
+        "Order",
+        "Family",
+        "Genus",
+        "Species"
+      ]
+    },
+    {
+      "input": "D",
+      "resolved_name": "D",
+      "id": "custom:D",
+      "status": "resolved",
+      "n_candidates": 1,
+      "lineage_depth": 8,
+      "lineage": ["Biota", "Animalia", "Chordata", "Mammalia", "Primates", "Hominidae", "Homo", "D"],
+      "candidates": [
+        {
+          "id": "custom:D",
+          "name": "D"
+        }
+      ],
+      "lineage_ranks": [
+        null,
+        "Kingdom",
+        "Phylum",
+        "Class",
+        "Order",
+        "Family",
+        "Genus",
+        "Species"
+      ]
+    },
+    {
+      "input": "E",
+      "resolved_name": "E",
+      "id": "custom:E",
+      "status": "resolved",
+      "n_candidates": 1,
+      "lineage_depth": 8,
+      "lineage": ["Biota", "Animalia", "Arthropoda", "Insecta", "Diptera", "Muscidae", "Musca", "E"],
+      "candidates": [
+        {
+          "id": "custom:E",
+          "name": "E"
+        }
+      ],
+      "lineage_ranks": [
+        null,
+        "Kingdom",
+        "Phylum",
+        "Class",
+        "Order",
+        "Family",
+        "Genus",
+        "Species"
+      ]
+    }
+  ],
+  "matrix": {
+    "labels": ["A", "B", "C", "D", "E"],
+    "values": [
+      [
+        0,
+        1,
+        3,
+        4,
+        6
+      ],
+      [
+        1,
+        0,
+        3,
+        4,
+        6
+      ],
+      [
+        3,
+        3,
+        0,
+        4,
+        6
+      ],
+      [
+        4,
+        4,
+        4,
+        0,
+        6
+      ],
+      [
+        6,
+        6,
+        6,
+        6,
+        0
+      ]
+    ]
+  }
+}

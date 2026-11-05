@@ -1,12 +1,33 @@
 import pandas as pd
 from .fetch import get_lineage
-from .distance import _compute_distance
+from .distance import _compute_distance, _as_taxon_list, _is_distance_frame
 from .distance import distance_matrix
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 import warnings
-from scipy.cluster.hierarchy import dendrogram
+
+
+def _pyplot():
+    """Import matplotlib.pyplot lazily; plotting is an optional extra."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as error:  # pragma: no cover - depends on environment
+        raise ImportError(
+            "Plotting requires matplotlib. Install it with "
+            "`pip install taxodist[plot]`."
+        ) from error
+    return plt
+
+
+def _seaborn():
+    """Import seaborn lazily; plotting is an optional extra."""
+    try:
+        import seaborn as sns
+    except ImportError as error:  # pragma: no cover - depends on environment
+        raise ImportError(
+            "taxo_heatmap() requires seaborn. Install it with "
+            "`pip install taxodist[plot]`."
+        ) from error
+    return sns
 
 def compare_lineages(taxon_a, taxon_b, verbose=False):
     """
@@ -121,11 +142,14 @@ def is_member(taxon, clade, verbose=False):
     bool or None
         A logical value, or None if the taxon cannot be found.
     """
+    if not isinstance(clade, str):
+        # str(None) would otherwise match a clade literally named "None".
+        raise TypeError("clade must be a single clade name (a string)")
     lin = get_lineage(taxon, verbose=verbose)
     if lin is None:
         return None
 
-    normalized_clade = str(clade).strip().casefold()
+    normalized_clade = clade.strip().casefold()
     normalized_lineage = [str(node).strip().casefold() for node in lin]
     return normalized_clade in normalized_lineage
 
@@ -151,14 +175,16 @@ def filter_clade(taxa, clade, verbose=False):
     list
         A list of taxa that are members of the specified clade.
     """
-    kept =[]
-    for t in taxa:
+    if not isinstance(clade, str):
+        raise TypeError("clade must be a single clade name (a string)")
+    kept = []
+    for t in _as_taxon_list(taxa):
         res = is_member(t, clade, verbose=verbose)
         if res is True:
             kept.append(t)
     return kept
 
-def taxo_heatmap(taxa, verbose=False, progress=True, **kwargs):
+def taxo_heatmap(taxa, verbose=False, progress=True, metric="reciprocal", **kwargs):
     """
     Plot a taxonomic heatmap
 
@@ -172,6 +198,9 @@ def taxo_heatmap(taxa, verbose=False, progress=True, **kwargs):
         Taxon names, a resolution or bundle, or a distance matrix DataFrame.
     verbose, progress : bool
         Passed to distance_matrix() when ``taxa`` is not already a matrix.
+    metric : str
+        Distance metric passed to distance_matrix() when ``taxa`` is not
+        already a matrix; see taxo_distance().
     **kwargs : dict
         Additional arguments passed to seaborn.clustermap. They override the
         defaults ``cmap="YlGnBu_r"`` and ``annot=True``.
@@ -181,10 +210,10 @@ def taxo_heatmap(taxa, verbose=False, progress=True, **kwargs):
     pandas.DataFrame
         The underlying distance matrix.
     """
-    if isinstance(taxa, pd.DataFrame) and not getattr(taxa, "_taxodist_resolution", False):
+    if _is_distance_frame(taxa):
         d = taxa
     else:
-        d = distance_matrix(taxa, verbose=verbose, progress=progress)
+        d = distance_matrix(taxa, verbose=verbose, progress=progress, metric=metric)
 
     if np.isnan(d.values).any():
         warnings.warn("Distance matrix contains NaN values. Heatmap skipped.")
@@ -197,6 +226,8 @@ def taxo_heatmap(taxa, verbose=False, progress=True, **kwargs):
         return d
     options = {"cmap": "YlGnBu_r", "annot": True}
     options.update(kwargs)
+    sns = _seaborn()
+    plt = _pyplot()
     sns.clustermap(d, **options)
     plt.show()
     
@@ -282,17 +313,27 @@ def print_taxodist_result(x):
         return x
     print("Taxonomic Distance")
     print(f"* {x['taxon_a']} vs {x['taxon_b']}")
-    print(f"  Distance : {x['distance']}")
+    metric = x.get("metric") or "reciprocal"
+    print(f"  Distance : {x['distance']} ({metric})")
     print(f"  MRCA     : {x['mrca']} (depth {x['mrca_depth']})")
     print(f"  Depth A  : {x['depth_a']}")
     print(f"  Depth B  : {x['depth_b']}")
     return x
 
-def plot_taxodist_cluster(x, main="Taxonomic Clustering", xlab="", sub="Method: hierarchical clustering", **kwargs):
-    """Plot method for taxodist_cluster objects"""
+def plot_taxodist_cluster(x, main="Taxonomic Clustering", xlab="", sub=None, **kwargs):
+    """
+    Plot method for taxodist_cluster objects
+
+    ``sub`` defaults to ``"Method: <linkage method>"``, as in R.
+    """
     if x is None or x.get("hclust") is None:
         return x
-        
+    if sub is None:
+        sub = f"Method: {x.get('method') or 'None'}"
+
+    from scipy.cluster.hierarchy import dendrogram
+
+    plt = _pyplot()
     plt.figure(figsize=(10, 6))
     dendrogram(x["hclust"], labels=x["dist"].index.tolist(), **kwargs)
     plt.title(main)
@@ -313,8 +354,9 @@ def plot_taxodist_ord(x, main="Taxonomic Ordination (PCoA)", xlab="PC1", ylab="P
     if plot_points.shape[1] == 1:
         plot_points["PC2"] = 0.0
 
+    plt = _pyplot()
     plt.figure(figsize=(8, 6))
-    # Cria o plot invisível (type="n" no R) para definir os limites
+    # Invisible points (type = "n" in R) set the axis limits.
     plt.scatter(plot_points.iloc[:, 0], plot_points.iloc[:, 1], alpha=0.0)
     
     if labels is None:

@@ -86,12 +86,13 @@ def test_parse_search_rows_skips_duplicates_and_invalid_rows():
           <tr><td>Alpha</td><td><a class="Valid" href="TaxonTree.aspx?id=1">t</a></td></tr>
           <tr><td>Alpha again</td><td><a class="Valid" href="TaxonTree.aspx?id=1">t</a></td></tr>
           <tr><td>Invalid</td><td><a class="Invalid" href="TaxonTree.aspx?id=2">t</a></td></tr>
-          <tr><td>Planet</td><td><a class="Valid" href="TaxonTree.aspx?id=3">t</a></td></tr>
+          <tr><td>Planet</td><td> <a class="Valid" href="TaxonTree.aspx?id=3">t</a></td></tr>
         </table>
         """,
         "lxml",
     )
-    assert fetch._parse_search_rows(soup) == [{"id": "1", "name": "Alpha t"}]
+    # As in R, the row text is concatenated without separators.
+    assert fetch._parse_search_rows(soup) == [{"id": "1", "name": "Alphat"}]
 
 
 def test_finalize_lineage_genus_queries():

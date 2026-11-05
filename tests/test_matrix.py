@@ -107,7 +107,7 @@ def test_focal_distances_reports_the_lineage_node_for_identical_taxa():
     assert result["mrca_depth"].iloc[0] == 3
 
 
-@patch("taxodist.utils.sns.clustermap")
+@patch("seaborn.clustermap")
 @patch("matplotlib.pyplot.show")
 def test_taxo_heatmap_accepts_a_resolution(mock_show, mock_sns):
     resolution = taxodist.taxo_from_lineages({

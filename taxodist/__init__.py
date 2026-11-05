@@ -9,6 +9,7 @@ based on Systema Naturae 2000.
 Core functions
 --------------
 - get_lineage() — retrieve the full lineage of any taxon
+- lineage_ranks() — the rank of every node of a lineage
 - taxo_distance() — compute the hierarchy distance between two taxa
 - mrca() — find the most recent common ancestor
 - distance_matrix() — compute all pairwise distances for a set of taxa
@@ -30,9 +31,13 @@ Core functions
 - taxo_bundle() — combine resolution, distances, metric, and provenance
 - write_taxodist_bundle() / read_taxodist_bundle() — exchange portable JSON
 - compare_bundles() — report what changed between two analyses
+- taxo_distinctness() / taxo_distinctness_test() — Warwick and Clarke's
+  taxonomic diversity and distinctness indices, and their randomization test
 
 Requests to The Taxonomicon are retried after transient failures; set
 ``taxodist.fetch.MAX_TRIES`` to change the number of attempts (default 3).
+Consecutive requests are spaced by at least ``taxodist.fetch.MIN_INTERVAL``
+seconds (default 0.25; set it to 0 to disable throttling).
 
 Mathematical background
 -----------------------
@@ -46,6 +51,11 @@ The deeper the shared ancestor, the smaller the distance. Distinct
 ancestor-descendant nodes therefore have positive distance. The measure is
 an ultrametric within each connected hierarchy. It represents classification
 depth, not evolutionary time or phylogenetic branch length.
+
+Other metrics are selected with ``metric=``: ``"path"`` (edges between the
+nodes), ``"wu_palmer"`` (1 - 2 depth(MRCA) / (depth(A) + depth(B))), and
+``"ranked"`` (half the path through the standard Linnaean ranks listed in
+``taxodist.distance.RANK_LEVELS``; Clarke and Warwick's step weights).
 
 Data source
 -----------
@@ -64,13 +74,21 @@ from ._version import __version__
 
 from .fetch import (
     clear_cache, save_cache, load_cache, cache_info,
-    get_taxonomicon_id, get_lineage_by_id, get_lineage, taxo_search,
-    TaxodistResolution, taxo_resolve, taxo_from_lineages
+    get_taxonomicon_id, get_lineage_by_id, get_lineage, lineage_ranks,
+    taxo_search, TaxodistResolution, taxo_resolve, taxo_from_lineages
 )
 
 from .distance import (
+    METRICS,
     taxo_distance, mrca, distance_matrix, cross_distances, closest_relative,
     focal_distances, lineage_depth, check_coverage, taxo_cluster, taxo_ordinate
+)
+
+from .distinctness import (
+    TaxodistDistinctnessTest,
+    taxo_distinctness,
+    taxo_distinctness_test,
+    print_taxodist_distinctness,
 )
 
 from .tree import TaxodistTree, taxo_tree
@@ -79,7 +97,7 @@ from .utils import (
     compare_lineages, shared_clades, is_member, filter_clade,
     taxo_heatmap, taxo_path,
     print_taxodist_result, plot_taxodist_cluster, plot_taxodist_ord,
-    summary_taxodist_ord, print_taxodist_path
+    summary_taxodist_ord, print_taxodist_path, print_focal_distances
 )
 
 from .data import load_taxobase

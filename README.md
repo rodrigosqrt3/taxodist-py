@@ -1,4 +1,4 @@
-# taxodist <picture><source media="(prefers-color-scheme: dark)" srcset="images/taxodist_dark.png"><source media="(prefers-color-scheme: light)" srcset="images/taxodist_sepia.png"><img alt="taxodist logo" src="images/taxodist_sepia.png" align="right" height="200"></picture>
+# taxodist <picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/rodrigosqrt3/taxodist-py/main/images/taxodist_dark.png"><source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/rodrigosqrt3/taxodist-py/main/images/taxodist_sepia.png"><img alt="taxodist logo" src="https://raw.githubusercontent.com/rodrigosqrt3/taxodist-py/main/images/taxodist_sepia.png" align="right" height="200"></picture>
 
 [![PyPI version](https://img.shields.io/pypi/v/taxodist.svg?color=blue)](https://pypi.org/project/taxodist/) &nbsp; [![Python Tests](https://github.com/rodrigosqrt3/taxodist-py/actions/workflows/python-app.yml/badge.svg)](https://github.com/rodrigosqrt3/taxodist-py/actions/workflows/python-app.yml) &nbsp; [![codecov](https://codecov.io/gh/rodrigosqrt3/taxodist-py/branch/main/graph/badge.svg)](https://app.codecov.io/gh/rodrigosqrt3/taxodist-py)
 
@@ -13,6 +13,14 @@ pip install taxodist
 ```
 ```bash
 pip install git+https://github.com/rodrigosqrt3/taxodist-py.git
+```
+
+The plotting helpers (`taxo_heatmap()`, `plot_taxodist_cluster()`,
+`plot_taxodist_ord()`) need matplotlib and seaborn, which are installed with
+the `plot` extra:
+
+```bash
+pip install "taxodist[plot]"
 ```
 
 ## Basic usage
@@ -135,9 +143,61 @@ produce `NaN` values in a distance matrix.
 The values represent classification depth. They are not evolutionary time,
 genetic distance, morphological divergence, or phylogenetic branch lengths.
 
-See [Methodological notes](docs/methodology.md) for the formal properties,
-assumptions, and limitations of the measure, and
-[R/Python parity](docs/r-python-parity.md) for the compatibility contract.
+### Other metrics and ranks
+
+`taxo_distance()`, `distance_matrix()`, `cross_distances()`,
+`closest_relative()`, `focal_distances()`, `taxo_heatmap()`, and
+`taxo_bundle()` accept `metric=` (also passed through by `taxo_cluster()` and
+`taxo_ordinate()`). With `h` the MRCA depth and `d_A`, `d_B` the lineage
+depths:
+
+| `metric` | distance | disconnected |
+|---|---|---|
+| `"reciprocal"` (default) | `1 / h` | `inf` |
+| `"path"` | `d_A + d_B - 2h` (edges in the classification tree) | `inf` |
+| `"wu_palmer"` | `1 - 2h / (d_A + d_B)` | `1` |
+| `"ranked"` | half the path through the root, the standard Linnaean ranks, and the terminal node | `inf` |
+
+Identical lineages always have distance 0. Matrices record the metric in
+`DataFrame.attrs["metric"]`. The `"ranked"` metric reproduces Clarke and
+Warwick's step weights (1 congeneric, 2 confamilial, ...) and needs the rank
+of every node: `lineage_ranks("Passer")` returns each node with its rank,
+`taxo_resolve()` stores them in a `ranks` column, and `taxo_from_lineages()`
+accepts `ranks=`. The rank levels are configurable through
+`taxodist.distance.RANK_LEVELS` (default kingdom, phylum, class, order,
+family, genus, species).
+
+```python
+resolved = taxo_from_lineages(
+    {"Alpha": ["Biota", "Animalia", "Alpha"], "Beta": ["Biota", "Animalia", "Beta"]},
+    ranks={"Alpha": [None, "Kingdom", "Genus"], "Beta": [None, "Kingdom", "Genus"]},
+)
+distance_matrix(resolved, metric="ranked")
+```
+
+Bundles (schema 1.1) record the metric, its rank levels, and the lineage
+ranks; schema 1.0 bundles are still read.
+
+### Taxonomic distinctness
+
+`taxo_distinctness()` computes Warwick and Clarke's taxonomic diversity
+(`Delta`), distinctness (`Delta_star`), average taxonomic distinctness
+(`Delta_plus`), its variation (`Lambda_plus`), and `SDelta_plus` for a list of
+taxa, a dict or Series of abundances, or a DataFrame with one row per sample.
+`taxo_distinctness_test()` compares `Delta_plus` and `Lambda_plus` of a sample
+with random samples from a master list (pass `seed=` for reproducibility):
+
+```python
+pool = distance_matrix(resolved_master_list, metric="ranked")
+taxo_distinctness(community_table, pool)
+taxo_distinctness_test(["Alpha", "Beta", "Gamma"], pool, n_iter=999, seed=1)
+```
+
+The R, Python, and Julia implementations share the lineage parser semantics
+(checked against the same TaxonTree test fixtures, including node ranks), the
+distance definitions, and the bundle JSON schema
+(`taxodist/schema/taxodist-bundle-v1.schema.json`). Distinctness values match
+R's `taxo_distinctness()` and `vegan::taxondive()`.
 
 ## Analysis helpers
 
@@ -153,6 +213,8 @@ The package also provides:
 
 Requests are retried automatically after transient network errors; set
 `taxodist.fetch.MAX_TRIES` to change the number of attempts (default 3).
+Consecutive requests are spaced by at least `taxodist.fetch.MIN_INTERVAL`
+seconds (default 0.25) so that large batches do not overload The Taxonomicon.
 
 Distance matrices are returned as symmetric `pandas.DataFrame` objects and can
 be passed directly to the clustering, ordination, and plotting helpers.
@@ -178,6 +240,10 @@ Without a file argument, `save_cache()` and `load_cache()` use a persistent
 per-user file (`%LOCALAPPDATA%\taxodist\Cache` on Windows,
 `~/Library/Caches/taxodist` on macOS, `$XDG_CACHE_HOME/taxodist` elsewhere);
 set `TAXODIST_CACHE_DIR` to choose another directory.
+
+Cache files record the version of the lineage parser. Lineages saved by an
+older parser are discarded with a warning when the file is loaded (taxon IDs
+are kept) and are retrieved again when needed.
 
 Only load cache files that you trust. As with any pickle file, loading an
 untrusted file can execute arbitrary code.

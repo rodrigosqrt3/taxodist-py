@@ -1,55 +1,61 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "taxodist"
-version = "0.9.0"
-authors =[
+dynamic = ["version"]
+authors = [
   { name="Rodrigo Fonseca Villa", email="rodrigo03.villa@gmail.com" }
 ]
 description = "Taxonomic hierarchy distances and lineage analysis"
 readme = "README.md"
-requires-python = ">=3.8"
-license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.9"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 keywords = [
     "taxonomy", "biodiversity", "bioinformatics", "ecology",
     "distance", "classification", "Taxonomicon"
 ]
-classifiers =[
-    "Development Status :: 4 - Beta",
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Operating System :: OS Independent",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
-dependencies =[
+dependencies = [
     "requests>=2.25.0",
     "beautifulsoup4>=4.9.0",
     "pandas>=1.2.0",
     "numpy>=1.20.0",
     "scipy>=1.6.0",
-    "matplotlib>=3.3.0",
-    "seaborn>=0.11.0",
     "lxml>=4.9.0"
 ]
 
 [project.optional-dependencies]
+plot = [
+    "matplotlib>=3.3.0",
+    "seaborn>=0.11.0"
+]
 test = [
     "pytest>=7.0",
-    "pytest-cov>=4.0"
+    "pytest-cov>=4.0",
+    "matplotlib>=3.3.0",
+    "seaborn>=0.11.0"
 ]
 dev = [
     "build>=1.0",
     "twine>=5.0"
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "taxodist._version.__version__"}
 
 [tool.setuptools.package-data]
 taxodist = ["data/*.json", "schema/*.json"]

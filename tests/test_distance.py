@@ -1616,7 +1616,7 @@ def test_fetch_get_lineage_return_none_for_empty_id(mock_get_lin):
     res = get_lineage("12345")
     assert res is None
 
-@patch("taxodist.utils.sns.clustermap")
+@patch("seaborn.clustermap")
 @patch("matplotlib.pyplot.show")
 @patch("taxodist.utils.distance_matrix")
 def test_utils_taxo_heatmap_with_list_and_valid_data(mock_dist, mock_show, mock_sns):
@@ -1626,7 +1626,9 @@ def test_utils_taxo_heatmap_with_list_and_valid_data(mock_dist, mock_show, mock_
     
     res = taxo_heatmap(["A", "B"], cmap="viridis", annot=False, progress=False)
     assert res is df
-    mock_dist.assert_called_once_with(["A", "B"], verbose=False, progress=False)
+    mock_dist.assert_called_once_with(
+        ["A", "B"], verbose=False, progress=False, metric="reciprocal"
+    )
     mock_sns.assert_called_once()
     assert mock_sns.call_args.kwargs == {"cmap": "viridis", "annot": False}
     mock_show.assert_called_once()
@@ -1675,7 +1677,7 @@ def test_load_taxobase_dimensions_are_correct():
 # ── Version 0.8.0 behavioral contract ────────────────────────────────────────
 
 def test_version_and_public_api_match_release_080():
-    assert taxodist.__version__ == "0.9.0"
+    assert taxodist.__version__ == "1.0.0"
     expected = {
         "cache_info", "check_coverage", "clear_cache", "closest_relative",
         "compare_lineages", "distance_matrix", "filter_clade",
@@ -1904,7 +1906,7 @@ def test_load_cache_accepts_valid_resolved_lineage_entries(tmp_path):
         "metadata": {"schema": 1},
     }
     with cache_file.open("wb") as stream:
-        pickle.dump(payload, stream)
+        pickle.dump({**payload, "meta_parser_version": 2}, stream)
 
     fetch.clear_cache()
     fetch.load_cache(cache_file)
@@ -2014,8 +2016,8 @@ def _offline_resolution():
 
 
 def test_public_version_and_v080_api():
-    assert taxodist.__version__ == "0.9.0"
-    assert taxodist.fetch._http_session.headers["User-Agent"].endswith("/0.9.0")
+    assert taxodist.__version__ == "1.0.0"
+    assert taxodist.fetch._http_session.headers["User-Agent"].endswith("/1.0.0")
     for name in (
         "TaxodistResolution",
         "taxo_resolve",
@@ -2028,10 +2030,12 @@ def test_public_version_and_v080_api():
     ):
         assert hasattr(taxodist, name)
 
+    # taxobase is exported from the R package, whose development versions
+    # look like "0.9.0.9000"; compare the released major.minor.patch part.
     built_with = taxodist.load_taxobase()["metadata"]["package_version"]
-    assert tuple(map(int, built_with.split("."))) <= tuple(
-        map(int, taxodist.__version__.split("."))
-    )
+    release = lambda version: tuple(int(part) for part in version.split(".")[:3]
+                                    if part.isdigit())
+    assert release(built_with) <= release(taxodist.__version__)
 
 
 def test_structured_search_distinguishes_failure_parse_absence_and_success():
@@ -2059,7 +2063,7 @@ def test_structured_search_distinguishes_failure_parse_absence_and_success():
         <tr><td>planet Alpha</td><td><a class='Valid' href='TaxonTree.aspx?id=9'>x</a></td></tr>
         <tr><td>bad</td><td><a class='Invalid' href='TaxonTree.aspx?id=8'>x</a></td></tr>
         <tr><td>missing</td><td><a class='Valid' href='TaxonTree.aspx?x=1'>x</a></td></tr>
-        <tr><td>N | T | P | R | B | L Alpha animal</td><td><a class='Valid' href='TaxonTree.aspx?id=1'>x</a></td></tr>
+        <tr><td>N|T|P|R|B|L</td><td> Alpha animal</td><td><a class='Valid' href='TaxonTree.aspx?id=1'> x</a></td></tr>
         <tr><td>Alpha duplicate</td><td><a class='Valid' href='TaxonTree.aspx?id=1'>x</a></td></tr>
       </table>
     """
@@ -2228,7 +2232,12 @@ def test_distance_matrix_accepts_resolution_bundle_and_rejects_malformed():
         taxodist.distance_matrix(invalid, progress=False)
 
     bundle = taxodist.taxo_bundle(resolution, progress=False)
-    assert taxodist.distance_matrix(bundle) is bundle["matrix"]
+    matrix = taxodist.distance_matrix(bundle)
+    pd.testing.assert_frame_equal(matrix, bundle["matrix"])
+    # A copy is returned, so changing it cannot corrupt the bundle.
+    assert matrix is not bundle["matrix"]
+    matrix.iloc[0, 1] = 99.0
+    assert bundle["matrix"].iloc[0, 1] == 0.5
 
 
 def test_bundle_construction_round_trip_and_portable_values(tmp_path):
@@ -2241,7 +2250,7 @@ def test_bundle_construction_round_trip_and_portable_values(tmp_path):
     )
     bundle = taxodist.taxo_bundle(resolution, progress=False)
     assert isinstance(bundle, TaxodistBundle)
-    assert bundle.schema_version == "1.0"
+    assert bundle.schema_version == "1.1"
     assert bundle.source == {
         "name": "Local taxonomy",
         "url": None,
@@ -2277,12 +2286,22 @@ def test_empty_bundle_round_trip(tmp_path):
 
 
 def test_bundle_default_source_and_name_resolution_path():
-    resolution = _offline_resolution()
+    # Without provenance, Taxonomicon IDs default to The Taxonomicon (as in
+    # R); other IDs cannot be labelled and raise a clear error.
+    resolution = taxodist.taxo_from_lineages(
+        {"Alpha": ["Biota", "Alpha"], "Beta": ["Biota", "Beta"]},
+        ids=["1", "2"],
+    )
     resolution.source = ""
     resolution.source_url = None
     bundle = taxodist.taxo_bundle(resolution, progress=False)
     assert bundle.source["name"] == "The Taxonomicon"
     assert bundle.source["url"] == "http://taxonomicon.taxonomy.nl"
+
+    custom = _offline_resolution()
+    custom.source = ""
+    with pytest.raises(ValueError, match="no source provenance"):
+        taxodist.taxo_bundle(custom, progress=False)
 
     with patch("taxodist.bundle.taxo_resolve", return_value=_offline_resolution()) as resolve:
         taxodist.taxo_bundle(["Alpha"], ambiguity="first", verbose=True, progress=False)
@@ -2340,7 +2359,14 @@ def test_bundle_validator_rejects_every_malformed_component():
     bad(unresolved_candidates, "unresolved record has candidates")
     bad(lambda x: x.update(matrix=[]), "pandas DataFrame")
     bad(lambda x: setattr(x["matrix"], "index", ["Beta", "Alpha"]), "matrix labels")
-    bad(lambda x: x["matrix"].__setitem__("Beta", [0.75, 0.0]), "stored distances")
+    def change_stored_distances(x):
+        # Bound to a name first: a setitem on the temporary x["matrix"]
+        # triggers pandas' ChainedAssignmentError warning under Copy-on-Write.
+        matrix = x["matrix"]
+        matrix["Beta"] = [0.75, 0.0]
+        assert x["matrix"]["Beta"].tolist() == [0.75, 0.0]
+
+    bad(change_stored_distances, "stored distances")
 
 
 @pytest.mark.parametrize(

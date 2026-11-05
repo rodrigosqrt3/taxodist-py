@@ -1,11 +1,154 @@
+import re
 import warnings
+from collections.abc import Mapping
 from numbers import Real
 import numpy as np
 import pandas as pd
-from scipy.cluster.hierarchy import linkage
-from scipy.spatial.distance import squareform
 
-from .fetch import get_lineage, get_taxonomicon_id, _lookup_taxonomicon_id
+from .fetch import (
+    get_lineage, get_taxonomicon_id, lineage_ranks, _lookup_taxonomicon_id,
+)
+
+#: Supported distance metrics (see taxo_distance()).
+METRICS = ("reciprocal", "path", "wu_palmer", "ranked")
+
+_DEFAULT_RANK_LEVELS = (
+    "kingdom", "phylum", "class", "order", "family", "genus", "species",
+)
+
+#: Rank levels used by the ``"ranked"`` metric, matched case-insensitively
+#: against the last word of each node's rank (so "Anamorph genus" counts as a
+#: genus). Equivalent of the R option ``taxodist.rank_levels``; for example
+#: ``taxodist.distance.RANK_LEVELS = ["kingdom", "phylum", "class", "order"]``.
+RANK_LEVELS = list(_DEFAULT_RANK_LEVELS)
+
+
+def _match_metric(metric):
+    """Validate a metric name and return it."""
+    if not isinstance(metric, str):
+        raise TypeError(f"metric must be one of {', '.join(map(repr, METRICS))}")
+    if metric not in METRICS:
+        raise ValueError(
+            f"Unknown distance metric {metric!r}. "
+            f"Use one of {', '.join(map(repr, METRICS))}."
+        )
+    return metric
+
+
+def _rank_levels():
+    """Validated, lower-case copy of ``RANK_LEVELS``."""
+    levels = RANK_LEVELS
+    if (
+        isinstance(levels, (str, bytes))
+        or not isinstance(levels, (list, tuple))
+        or not levels
+        or any(not isinstance(level, str) for level in levels)
+    ):
+        raise ValueError(
+            "taxodist.distance.RANK_LEVELS must be a non-empty list of strings"
+        )
+    return [level.strip().lower() for level in levels]
+
+
+def _project_lineage(lineage, ranks, levels):
+    """
+    Reduce a lineage to its nodes whose rank is one of ``levels`` (compared
+    on the lower-cased last word of the rank), always keeping the root node,
+    so that taxa of different kingdoms remain connected, and the terminal
+    node.
+    """
+    n = len(lineage)
+    if n == 0:
+        return list(lineage)
+    levels = set(levels)
+    keep = [
+        rank is not None and re.sub(r"^.*\s", "", rank, flags=re.DOTALL).lower() in levels
+        for rank in ranks
+    ]
+    keep[0] = True
+    keep[-1] = True
+    return [node for node, kept in zip(lineage, keep) if kept]
+
+
+def _has_ranks(lineage, ranks):
+    return (
+        ranks is not None
+        and len(ranks) == len(lineage)
+        and any(rank is not None for rank in ranks)
+    )
+
+
+def _metric_lineages(lineages, ranks, labels, metric, levels=None):
+    """
+    Lineages on which ``metric`` is computed: unchanged for depth-based
+    metrics; reduced to the standard rank levels for ``"ranked"``, which
+    raises an error for lineages without rank information.
+    """
+    if metric != "ranked":
+        return list(lineages)
+    if levels is None:
+        levels = _rank_levels()
+    ranks = list(ranks) if ranks is not None else [None] * len(lineages)
+    unranked = [
+        label for label, lineage, node_ranks in zip(labels, lineages, ranks)
+        if lineage is not None and not _has_ranks(lineage, node_ranks)
+    ]
+    if unranked:
+        raise ValueError(
+            "The 'ranked' metric requires the rank of every lineage node. "
+            f"No ranks are available for {', '.join(map(repr, map(str, unranked)))}. "
+            "Supply `ranks` to taxo_from_lineages() or use another metric."
+        )
+    return [
+        None if lineage is None else _project_lineage(lineage, node_ranks, levels)
+        for lineage, node_ranks in zip(lineages, ranks)
+    ]
+
+
+def _metric_values(h, da, db, metric):
+    """
+    Distance from MRCA depth ``h`` and lineage depths ``da``, ``db``
+    (vectorized). For "ranked", depths refer to reduced lineages.
+    """
+    h = np.asarray(h, dtype=float)
+    da = np.asarray(da, dtype=float)
+    db = np.asarray(db, dtype=float)
+    h, da, db = np.broadcast_arrays(h, da, db)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if metric == "reciprocal":
+            values = 1.0 / h
+        elif metric == "path":
+            values = np.where(h == 0, np.inf, da + db - 2 * h)
+        elif metric == "wu_palmer":
+            values = 1.0 - 2.0 * h / (da + db)
+        elif metric == "ranked":
+            values = np.where(h == 0, np.inf, (da + db - 2 * h) / 2.0)
+        else:  # pragma: no cover - validated by _match_metric()
+            raise ValueError(f"Unknown distance metric {metric!r}")
+    values = np.array(values, dtype=float)
+    values[(h > 0) & (h == da) & (h == db)] = 0.0
+    return values
+
+
+def _as_taxon_list(taxa):
+    """
+    Materialise a collection of taxon names as a list.
+
+    A single string is one taxon (as a length-one character vector in R),
+    and iterables such as generators are consumed once.
+    """
+    if isinstance(taxa, (str, bytes)):
+        return [taxa]
+    if isinstance(taxa, Mapping):
+        raise TypeError("taxa must be a sequence of taxon names, not a dictionary")
+    return list(taxa)
+
+
+def _is_distance_frame(taxa):
+    """True for a plain distance-matrix DataFrame (not a resolution table)."""
+    return isinstance(taxa, pd.DataFrame) and not getattr(
+        taxa, "_taxodist_resolution", False
+    )
 
 def _common_prefix_depth(lin_a, lin_b):
     """Return the length of the continuous common prefix."""
@@ -17,20 +160,19 @@ def _common_prefix_depth(lin_a, lin_b):
     return depth
 
 
-def _distance_value(lin_a, lin_b):
-    """Numeric-only hierarchy distance used by matrix construction."""
+def _distance_value(lin_a, lin_b, metric="reciprocal"):
+    """Numeric-only hierarchy distance (depth-based metrics only)."""
     mrca_depth = _common_prefix_depth(lin_a, lin_b)
-    if mrca_depth == 0:
-        return float("inf")
-    if len(lin_a) == len(lin_b) == mrca_depth:
-        return 0.0
-    return 1.0 / mrca_depth
+    return float(_metric_values(mrca_depth, len(lin_a), len(lin_b), metric))
 
 
-def _compute_distance(lin_a, lin_b, name_a="A", name_b="B"):
+def _compute_distance(lin_a, lin_b, name_a="A", name_b="B",
+                      metric="reciprocal", ranks_a=None, ranks_b=None):
     """
     Internal helper to compute distance between two parsed lineages.
-    Equivalent to the hidden .compute_distance in R.
+    Equivalent to the hidden .compute_distance in R. The ``"ranked"`` metric
+    needs the node ranks of both lineages (``ranks_a``, ``ranks_b``); the
+    MRCA is always reported on the full lineages.
     """
     depth_a = len(lin_a)
     depth_b = len(lin_b)
@@ -39,39 +181,50 @@ def _compute_distance(lin_a, lin_b, name_a="A", name_b="B"):
     # repeated after divergence is a homonym, not a shared hierarchy node.
     mrca_depth = _common_prefix_depth(lin_a, lin_b)
 
-    if mrca_depth == 0:
-        return {
-            "distance": float('inf'),
-            "mrca": None,
-            "mrca_depth": 0,
-            "depth_a": depth_a,
-            "depth_b": depth_b,
-            "taxon_a": name_a,
-            "taxon_b": name_b
-        }
-
-    mrca_name = lin_a[mrca_depth - 1]
-    same_lineage = depth_a == depth_b == mrca_depth
-    distance = 0.0 if same_lineage else 1.0 / mrca_depth
+    if metric == "ranked":
+        reduced = _metric_lineages(
+            [lin_a, lin_b], [ranks_a, ranks_b], [name_a, name_b], metric
+        )
+        distance = float(_metric_values(
+            _common_prefix_depth(reduced[0], reduced[1]),
+            len(reduced[0]), len(reduced[1]), metric,
+        ))
+    else:
+        distance = float(_metric_values(mrca_depth, depth_a, depth_b, metric))
 
     return {
         "distance": distance,
-        "mrca": mrca_name,
+        "mrca": None if mrca_depth == 0 else lin_a[mrca_depth - 1],
         "mrca_depth": mrca_depth,
         "depth_a": depth_a,
         "depth_b": depth_b,
         "taxon_a": name_a,
-        "taxon_b": name_b
+        "taxon_b": name_b,
+        "metric": metric,
     }
 
 
-def taxo_distance(taxon_a, taxon_b, verbose=False):
+def _lineage_for_metric(taxon, metric, verbose=False):
+    """
+    ``(lineage, ranks)`` of a taxon: plain lineages from get_lineage() (ranks
+    None) for depth-based metrics, lineages with ranks from lineage_ranks()
+    for ``"ranked"``. ``(None, None)`` when the taxon cannot be found.
+    """
+    if metric == "ranked":
+        ranked = lineage_ranks(taxon, verbose=verbose)
+        if ranked is None:
+            return None, None
+        return list(ranked["node"]), list(ranked["rank"])
+    return get_lineage(taxon, verbose=verbose), None
+
+
+def taxo_distance(taxon_a, taxon_b, verbose=False, metric="reciprocal"):
     """
     Compute the taxonomic hierarchy distance between two taxa
 
     Given two taxon names, retrieves their lineages from The Taxonomicon and
     computes a taxonomic distance based on the depth of their most recent
-    common ancestor (MRCA):
+    common ancestor (MRCA). With the default metric:
 
     d(A, B) = 1 / depth(MRCA(A, B))
 
@@ -79,6 +232,25 @@ def taxo_distance(taxon_a, taxon_b, verbose=False):
     This metric ensures that taxa diverging at the same node are always
     equidistant from any third taxon, regardless of lineage depth differences
     below the split.
+
+    Metrics
+    -------
+    Let h be the MRCA depth and d_A, d_B the lineage depths (numbers of
+    nodes, root included). Every metric is zero for identical lineages.
+
+    - ``"reciprocal"`` (default): 1 / h. An ultrametric.
+    - ``"path"``: d_A + d_B - 2h, the number of edges between the two nodes
+      in the classification tree.
+    - ``"wu_palmer"``: 1 - 2h / (d_A + d_B), the complement of the
+      Wu-Palmer similarity, in [0, 1).
+    - ``"ranked"``: half the path length after reducing both lineages to the
+      root, the nodes of the standard Linnaean ranks (``RANK_LEVELS``), and
+      the terminal node. For taxa of the same rank these are Clarke and
+      Warwick's step weights (1 congeneric, 2 confamilial, ...). Requires
+      lineage ranks (see lineage_ranks()).
+
+    Lineages without a shared root have infinite distance, except under
+    ``"wu_palmer"``, where their distance is 1.
 
     Parameters
     ----------
@@ -88,6 +260,9 @@ def taxo_distance(taxon_a, taxon_b, verbose=False):
         A character string giving the second taxon name.
     verbose : bool
         Logical. If True, prints progress messages. Default False.
+    metric : str
+        One of ``"reciprocal"`` (default), ``"path"``, ``"wu_palmer"``, or
+        ``"ranked"``.
 
     Returns
     -------
@@ -102,10 +277,12 @@ def taxo_distance(taxon_a, taxon_b, verbose=False):
         - depth_b: Integer. The lineage depth of taxon B.
         - taxon_a: Character. Name of the first taxon.
         - taxon_b: Character. Name of the second taxon.
+        - metric: Character. The metric used.
         Returns None if either taxon cannot be found.
     """
-    lin_a = get_lineage(taxon_a, verbose=verbose)
-    lin_b = get_lineage(taxon_b, verbose=verbose)
+    metric = _match_metric(metric)
+    lin_a, ranks_a = _lineage_for_metric(taxon_a, metric, verbose=verbose)
+    lin_b, ranks_b = _lineage_for_metric(taxon_b, metric, verbose=verbose)
 
     if lin_a is None:
         print(f"Error: Could not retrieve lineage for {taxon_a}")
@@ -114,7 +291,10 @@ def taxo_distance(taxon_a, taxon_b, verbose=False):
         print(f"Error: Could not retrieve lineage for {taxon_b}")
         return None
 
-    return _compute_distance(lin_a, lin_b, taxon_a, taxon_b)
+    return _compute_distance(
+        lin_a, lin_b, taxon_a, taxon_b,
+        metric=metric, ranks_a=ranks_a, ranks_b=ranks_b,
+    )
 
 
 def mrca(taxon_a, taxon_b, verbose=False):
@@ -144,7 +324,7 @@ def mrca(taxon_a, taxon_b, verbose=False):
         return None
     return result["mrca"]
 
-def distance_matrix(taxa, verbose=False, progress=True):
+def distance_matrix(taxa, verbose=False, progress=True, metric="reciprocal"):
     """
     Compute pairwise taxonomic distances for a set of taxa
 
@@ -157,12 +337,16 @@ def distance_matrix(taxa, verbose=False, progress=True):
     ----------
     taxa : sequence of str, TaxodistResolution, or TaxodistBundle
         Taxon names are retrieved normally. Resolution objects reuse their
-        stored lineages and preserve their input labels. Bundles return their
-        validated stored matrix without network access or recomputation.
+        stored lineages (and ranks) and preserve their input labels. Bundles
+        return their validated stored matrix without network access or
+        recomputation.
     verbose : bool
         Logical. If True, prints progress for each pair. Default False.
     progress : bool
         Logical. If True, shows progress status. Default True.
+    metric : str
+        Distance metric; see taxo_distance(). Ignored for a bundle, whose
+        stored matrix is returned.
 
     Returns
     -------
@@ -170,27 +354,43 @@ def distance_matrix(taxa, verbose=False, progress=True):
         A symmetric numeric DataFrame containing pairwise distances.
         Row and column names are set to the input taxon names.
         Taxa that could not be found are included with NaN distances.
+        ``DataFrame.attrs["metric"]`` records the metric (the equivalent of
+        the ``"method"`` attribute of R's ``dist`` object).
     """
     if getattr(taxa, "_taxodist_bundle", False):
         from .bundle import validate_taxodist_bundle
 
         validate_taxodist_bundle(taxa, check_distances=False)
-        return taxa["matrix"]
+        # Return a copy so that changes do not corrupt the stored bundle.
+        return taxa["matrix"].copy()
 
-    labels, lineages = _matrix_input(taxa, verbose=verbose, progress=progress)
+    metric = _match_metric(metric)
+    return _distance_matrix_impl(
+        taxa, verbose=verbose, progress=progress, metric=metric,
+        levels=_rank_levels() if metric == "ranked" else None,
+    )
+
+
+def _distance_matrix_impl(taxa, verbose, progress, metric, levels):
+    labels, lineages, ranks = _matrix_input_ranked(
+        taxa, verbose=verbose, progress=progress, ranks=metric == "ranked"
+    )
+    lineages = _metric_lineages(lineages, ranks, labels, metric, levels)
     n = len(labels)
 
     if progress:
         print(f"Computing distances for {n * (n - 1) // 2} pairs...")
-    mat = _distance_block(lineages, lineages)
+    mat = _distance_block(lineages, lineages, metric)
     np.fill_diagonal(mat, 0.0)
     if progress:
         print("Done.")
 
-    return pd.DataFrame(mat, index=labels, columns=labels)
+    result = pd.DataFrame(mat, index=labels, columns=labels)
+    result.attrs["metric"] = metric
+    return result
 
 
-def cross_distances(x, y, verbose=False, progress=True):
+def cross_distances(x, y, verbose=False, progress=True, metric="reciprocal"):
     """
     Compute taxonomic distances between two sets of taxa
 
@@ -207,47 +407,109 @@ def cross_distances(x, y, verbose=False, progress=True):
         If True, prints retrieval messages.
     progress : bool
         If True, prints progress messages.
+    metric : str
+        Distance metric; see taxo_distance().
 
     Returns
     -------
     pandas.DataFrame
         One row per element of ``x`` and one column per element of ``y``.
         Taxa that could not be found have NaN distances; taxa without a
-        common ancestor have ``inf``.
+        common ancestor have ``inf`` (1 under ``"wu_palmer"``).
+        ``attrs["metric"]`` records the metric.
     """
-    labels_x, lineages_x = _matrix_input(x, verbose=verbose, progress=progress)
-    labels_y, lineages_y = _matrix_input(y, verbose=verbose, progress=progress)
-    return pd.DataFrame(
-        _distance_block(lineages_x, lineages_y),
+    metric = _match_metric(metric)
+    need_ranks = metric == "ranked"
+    levels = _rank_levels() if need_ranks else None
+    labels_x, lineages_x, ranks_x = _matrix_input_ranked(
+        x, verbose=verbose, progress=progress, ranks=need_ranks
+    )
+    labels_y, lineages_y, ranks_y = _matrix_input_ranked(
+        y, verbose=verbose, progress=progress, ranks=need_ranks
+    )
+    lineages_x = _metric_lineages(lineages_x, ranks_x, labels_x, metric, levels)
+    lineages_y = _metric_lineages(lineages_y, ranks_y, labels_y, metric, levels)
+    result = pd.DataFrame(
+        _distance_block(lineages_x, lineages_y, metric),
         index=labels_x,
         columns=labels_y,
         dtype=float,
     )
+    result.attrs["metric"] = metric
+    return result
 
 
 def _matrix_input(taxa, verbose=False, progress=True):
     """Return ``(labels, lineages)`` for names, resolutions, or bundles."""
+    labels, lineages, _ = _matrix_input_ranked(
+        taxa, verbose=verbose, progress=progress, ranks=False
+    )
+    return labels, lineages
+
+
+def _cell_ranks(value):
+    """A resolution ``ranks`` cell as a list, or None when absent."""
+    if value is None:
+        return None
+    if isinstance(value, float) and np.isnan(value):
+        return None
+    return list(value)
+
+
+def _matrix_input_ranked(taxa, verbose=False, progress=True, ranks=False):
+    """
+    Return ``(labels, lineages, ranks)`` for names, resolutions, or bundles.
+
+    ``ranks`` holds one rank list (or None) per lineage. Resolutions provide
+    their stored ranks when the ``ranks`` column exists and aligns with the
+    lineage. Names are retrieved with lineage_ranks() when ``ranks=True``
+    and with get_lineage() otherwise (their ranks are then None).
+    """
     if getattr(taxa, "_taxodist_bundle", False):
         taxa = taxa["resolution"]
     if getattr(taxa, "_taxodist_resolution", False):
         required = {"input", "status", "lineage"}
         if not required.issubset(taxa.columns):
             raise ValueError("Invalid TaxodistResolution object")
-        return list(taxa["input"]), list(taxa["lineage"])
+        lineages = list(taxa["lineage"])
+        rank_lists = [None] * len(lineages)
+        if "ranks" in taxa.columns:
+            for i, (lineage, value) in enumerate(zip(lineages, taxa["ranks"])):
+                node_ranks = _cell_ranks(value)
+                if (
+                    lineage is not None
+                    and node_ranks is not None
+                    and len(node_ranks) == len(lineage)
+                ):
+                    rank_lists[i] = node_ranks
+        return list(taxa["input"]), lineages, rank_lists
     if isinstance(taxa, (str, bytes)):
         raise TypeError("taxa must be a sequence of taxon names, not a single string")
+    if isinstance(taxa, (Mapping, pd.DataFrame)):
+        # R rejects lists here; a dict or table of names is ambiguous.
+        raise TypeError(
+            "taxa must be a sequence of taxon names, a TaxodistResolution, or "
+            "a TaxodistBundle"
+        )
 
     labels = list(taxa)
     if progress:
         print(f"Fetching {len(labels)} lineages...")
-    lineages = [
-        None if t is None or (isinstance(t, float) and np.isnan(t))
-        else get_lineage(t, verbose=verbose)
-        for t in labels
-    ]
+    lineages, rank_lists = [], []
+    for t in labels:
+        if t is None or (isinstance(t, float) and np.isnan(t)):
+            lineages.append(None)
+            rank_lists.append(None)
+        elif ranks:
+            lineage, node_ranks = _lineage_for_metric(t, "ranked", verbose=verbose)
+            lineages.append(lineage)
+            rank_lists.append(node_ranks)
+        else:
+            lineages.append(get_lineage(t, verbose=verbose))
+            rank_lists.append(None)
     if progress:
         print("Lineages fetched.")
-    return labels, lineages
+    return labels, lineages, rank_lists
 
 
 def _prefix_node_ids(lineages):
@@ -272,8 +534,12 @@ def _prefix_node_ids(lineages):
     return ids, np.asarray(lengths, dtype=np.int64)
 
 
-def _distance_block(lineages_a, lineages_b):
-    """Vectorized distances between every lineage in ``a`` and ``b``."""
+def _distance_block(lineages_a, lineages_b, metric="reciprocal"):
+    """
+    Vectorized distances between every lineage in ``a`` and ``b``. For the
+    ``"ranked"`` metric the lineages must already be reduced with
+    ``_metric_lineages()``.
+    """
     ids, lengths = _prefix_node_ids(list(lineages_a) + list(lineages_b))
     n_a = len(lineages_a)
     ids_a, ids_b = ids[:n_a], ids[n_a:]
@@ -283,11 +549,7 @@ def _distance_block(lineages_a, lineages_b):
     for column in range(len(lineages_b)):
         shared = (ids_a == ids_b[column]) & (ids_a >= 0)
         mrca_depth = shared.sum(axis=1)
-        with np.errstate(divide="ignore"):
-            values = 1.0 / mrca_depth
-        identical = (mrca_depth > 0) & (mrca_depth == len_b[column]) & (len_a == len_b[column])
-        values[identical] = 0.0
-        out[:, column] = values
+        out[:, column] = _metric_values(mrca_depth, len_a, len_b[column], metric)
 
     missing_a = np.array([lineage is None for lineage in lineages_a], dtype=bool)
     missing_b = np.array([lineage is None for lineage in lineages_b], dtype=bool)
@@ -296,7 +558,7 @@ def _distance_block(lineages_a, lineages_b):
     return out
 
 
-def closest_relative(taxon, candidates, verbose=False):
+def closest_relative(taxon, candidates, verbose=False, metric="reciprocal"):
     """
     Find the closest relative of a taxon among a set of candidates
 
@@ -311,6 +573,8 @@ def closest_relative(taxon, candidates, verbose=False):
         A list of candidate taxon names to compare against.
     verbose : bool
         Logical. If True, prints progress messages. Default False.
+    metric : str
+        Distance metric; see taxo_distance().
 
     Returns
     -------
@@ -319,7 +583,9 @@ def closest_relative(taxon, candidates, verbose=False):
         (tree metric distance), sorted by distance ascending. Returns None if
         the query taxon cannot be found.
     """
-    query_lin = get_lineage(taxon, verbose=verbose)
+    metric = _match_metric(metric)
+    candidates = _as_taxon_list(candidates)
+    query_lin, query_ranks = _lineage_for_metric(taxon, metric, verbose=verbose)
     if query_lin is None:
         print(f"Error: Could not retrieve lineage for {taxon}")
         return None
@@ -332,17 +598,21 @@ def closest_relative(taxon, candidates, verbose=False):
 
     results =[]
     for cand in candidates:
-        cand_lin = get_lineage(cand, verbose=verbose)
+        cand_lin, cand_ranks = _lineage_for_metric(cand, metric, verbose=verbose)
         if cand_lin is None:
             results.append({"taxon": cand, "distance": float('nan')})
         else:
-            dist_result = _compute_distance(query_lin, cand_lin, taxon, cand)
+            dist_result = _compute_distance(
+                query_lin, cand_lin, taxon, cand,
+                metric=metric, ranks_a=query_ranks, ranks_b=cand_ranks,
+            )
             results.append({"taxon": cand, "distance": dist_result["distance"]})
 
     df = pd.DataFrame(results)
     return df.sort_values(by="distance", na_position='last').reset_index(drop=True)
 
-def focal_distances(focal, community, verbose=False, progress=True):
+def focal_distances(focal, community, verbose=False, progress=True,
+                    metric="reciprocal"):
     """
     Compute distances from a focal taxon to a community of taxa
 
@@ -363,6 +633,8 @@ def focal_distances(focal, community, verbose=False, progress=True):
         If True, prints progress messages. Default False.
     progress : bool
         If True, prints progress status. Default True.
+    metric : str
+        Distance metric; see taxo_distance().
 
     Returns
     -------
@@ -375,7 +647,9 @@ def focal_distances(focal, community, verbose=False, progress=True):
         Rows are sorted by distance ascending (closest relatives first).
         Returns None if the focal taxon cannot be found.
     """
-    focal_lin = get_lineage(focal, verbose=verbose)
+    metric = _match_metric(metric)
+    community = _as_taxon_list(community)
+    focal_lin, focal_ranks = _lineage_for_metric(focal, metric, verbose=verbose)
     if focal_lin is None:
         print(f"Error: Could not retrieve lineage for {focal}")
         return None
@@ -398,7 +672,7 @@ def focal_distances(focal, community, verbose=False, progress=True):
         if progress:
             print(f"  [{i + 1}/{len(community)}] {taxon}")
 
-        cand_lin = get_lineage(taxon, verbose=verbose)
+        cand_lin, cand_ranks = _lineage_for_metric(taxon, metric, verbose=verbose)
         if cand_lin is None:
             results.append({
                 "taxon":      taxon,
@@ -407,7 +681,10 @@ def focal_distances(focal, community, verbose=False, progress=True):
                 "mrca_depth": None
             })
         else:
-            res = _compute_distance(focal_lin, cand_lin, focal, taxon)
+            res = _compute_distance(
+                focal_lin, cand_lin, focal, taxon,
+                metric=metric, ranks_a=focal_ranks, ranks_b=cand_ranks,
+            )
             results.append({
                 "taxon":      taxon,
                 "distance":   res["distance"],
@@ -418,7 +695,10 @@ def focal_distances(focal, community, verbose=False, progress=True):
     if progress:
         print("Done.")
 
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(results, columns=["taxon", "distance", "mrca", "mrca_depth"])
+    df["distance"] = df["distance"].astype("float64")
+    # Nullable integers, as for an empty community.
+    df["mrca_depth"] = pd.array(df["mrca_depth"], dtype="Int64")
     df = df.sort_values(by="distance", na_position="last").reset_index(drop=True)
     df.attrs["focal"] = focal
     return df
@@ -458,8 +738,9 @@ def check_coverage(taxa, verbose=False):
 
     Parameters
     ----------
-    taxa : list of str
-        A list of one or more taxon names.
+    taxa : str or iterable of str
+        One taxon name, or an iterable of taxon names (a single string is
+        treated as one name, not as a sequence of characters).
     verbose : bool
         Logical. If True, prints progress messages. Default False.
 
@@ -471,6 +752,7 @@ def check_coverage(taxa, verbose=False):
         ``pd.NA`` that the answer is unknown because the server could not be
         reached.
     """
+    taxa = _as_taxon_list(taxa)
     outcome = {"found": True, "not_found": False}
     values = [
         outcome.get(_lookup_taxonomicon_id(t, verbose=verbose)[1], pd.NA)
@@ -487,15 +769,19 @@ def taxo_cluster(taxa, method="average", **kwargs):
 
     Parameters
     ----------
-    taxa : list of str or pandas.DataFrame
-        A list of taxon names, or a distance matrix DataFrame from distance_matrix().
+    taxa : list of str, TaxodistResolution, TaxodistBundle, or pandas.DataFrame
+        Taxon names, a resolution or bundle (passed to distance_matrix()), or
+        a distance matrix DataFrame from distance_matrix().
     method : str
-        Clustering method. Default "average" (UPGMA), which works well 
-        with taxonomic distances.
+        Clustering method passed to scipy.cluster.hierarchy.linkage().
+        Default "average" (UPGMA), which works well with taxonomic distances.
     verbose : bool
         Logical. If True, prints progress messages. Default False.
     progress : bool
         Logical. If True, shows progress status. Default True.
+    metric : str
+        Distance metric passed to distance_matrix() (see taxo_distance());
+        the matrix records it in ``attrs["metric"]``.
 
     Returns
     -------
@@ -503,28 +789,34 @@ def taxo_cluster(taxa, method="average", **kwargs):
         A dictionary with:
         - hclust: The hierarchical clustering linkage matrix (SciPy format).
         - dist: The underlying distance matrix DataFrame.
+        - method: The linkage method used.
     """
-    if isinstance(taxa, pd.DataFrame):
+    # A TaxodistResolution is a DataFrame subclass but not a distance matrix:
+    # like names and bundles, it is passed through distance_matrix().
+    if _is_distance_frame(taxa):
         d = taxa
     else:
         d = distance_matrix(taxa, **kwargs)
 
     if np.isnan(d.values).any():
         warnings.warn("Distance matrix contains NaN values (taxa not found or server offline). Clustering skipped.")
-        return {"hclust": None, "dist": d}
+        return {"hclust": None, "dist": d, "method": method}
 
     if not np.isfinite(d.values).all():
         warnings.warn("Distance matrix contains infinite values (no shared ancestor). Clustering skipped.")
-        return {"hclust": None, "dist": d}
+        return {"hclust": None, "dist": d, "method": method}
 
     if d.shape[0] < 2:
         warnings.warn("At least two taxa are required for clustering. Clustering skipped.")
-        return {"hclust": None, "dist": d}
+        return {"hclust": None, "dist": d, "method": method}
+
+    from scipy.cluster.hierarchy import linkage
+    from scipy.spatial.distance import squareform
 
     condensed_dist = squareform(d.values, checks=False)
     hc = linkage(condensed_dist, method=method)
 
-    return {"hclust": hc, "dist": d}
+    return {"hclust": hc, "dist": d, "method": method}
 
 def taxo_ordinate(taxa, k=2, **kwargs):
     """
@@ -535,14 +827,18 @@ def taxo_ordinate(taxa, k=2, **kwargs):
 
     Parameters
     ----------
-    taxa : list of str or pandas.DataFrame
-        A list of taxon names, or a distance matrix DataFrame from distance_matrix().
+    taxa : list of str, TaxodistResolution, TaxodistBundle, or pandas.DataFrame
+        Taxon names, a resolution or bundle (passed to distance_matrix()), or
+        a distance matrix DataFrame from distance_matrix().
     k : int
         Number of dimensions. Default 2.
     verbose : bool
         Logical. If True, prints progress messages. Default False.
     progress : bool
         Logical. If True, shows progress status. Default True.
+    metric : str
+        Distance metric passed to distance_matrix() (see taxo_distance());
+        the matrix records it in ``attrs["metric"]``.
 
     Returns
     -------
@@ -553,7 +849,7 @@ def taxo_ordinate(taxa, k=2, **kwargs):
         - GOF: Goodness-of-fit (matches R's cmdscale GOF).
         - eig: The eigenvalues computed during PCoA.
     """
-    if isinstance(taxa, pd.DataFrame):
+    if _is_distance_frame(taxa):
         d = taxa
     else:
         d = distance_matrix(taxa, **kwargs)
