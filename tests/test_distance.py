@@ -39,7 +39,7 @@ def test_taxodist_package_loads():
 def test_fetch_uses_one_persistent_http_session():
     assert isinstance(fetch._http_session, requests.Session)
     assert fetch._http_session.headers["User-Agent"] == (
-        f"taxodist Python package/{taxodist.__version__}"
+        f"taxodist/{taxodist.__version__} (Python; +https://taxodist.github.io)"
     )
 
 def test_compute_distance_works_correctly():
@@ -1674,7 +1674,7 @@ def test_load_taxobase_dimensions_are_correct():
 # ── Version 0.8.0 behavioral contract ────────────────────────────────────────
 
 def test_version_and_public_api_match_release_080():
-    assert taxodist.__version__ == "1.0.0"
+    assert taxodist.__version__ == "1.1.0"
     expected = {
         "cache_info", "check_coverage", "clear_cache", "closest_relative",
         "compare_lineages", "distance_matrix", "filter_clade",
@@ -2013,8 +2013,10 @@ def _offline_resolution():
 
 
 def test_public_version_and_v080_api():
-    assert taxodist.__version__ == "1.0.0"
-    assert taxodist.fetch._http_session.headers["User-Agent"].endswith("/1.0.0")
+    assert taxodist.__version__ == "1.1.0"
+    assert taxodist.fetch._http_session.headers["User-Agent"] == (
+        "taxodist/1.1.0 (Python; +https://taxodist.github.io)"
+    )
     for name in (
         "TaxodistResolution",
         "taxo_resolve",
@@ -2283,8 +2285,8 @@ def test_empty_bundle_round_trip(tmp_path):
 
 
 def test_bundle_default_source_and_name_resolution_path():
-    # Without provenance, Taxonomicon IDs default to The Taxonomicon (as in
-    # R); other IDs cannot be labelled and raise a clear error.
+    # Without provenance, the source defaults to The Taxonomicon whatever
+    # the IDs, as in R (bundle.R).
     resolution = taxodist.taxo_from_lineages(
         {"Alpha": ["Biota", "Alpha"], "Beta": ["Biota", "Beta"]},
         ids=["1", "2"],
@@ -2297,13 +2299,18 @@ def test_bundle_default_source_and_name_resolution_path():
 
     custom = _offline_resolution()
     custom.source = ""
-    with pytest.raises(ValueError, match="no source provenance"):
-        taxodist.taxo_bundle(custom, progress=False)
+    custom.source_url = None
+    assert taxodist.taxo_bundle(custom, progress=False).source == {
+        "name": "The Taxonomicon",
+        "url": "http://taxonomicon.taxonomy.nl",
+        "retrieved_at": custom.retrieved_at,
+    }
 
     with patch("taxodist.bundle.taxo_resolve", return_value=_offline_resolution()) as resolve:
         taxodist.taxo_bundle(["Alpha"], ambiguity="first", verbose=True, progress=False)
     resolve.assert_called_once_with(
-        ["Alpha"], ambiguity="first", verbose=True, progress=False, within=None
+        ["Alpha"], ambiguity="first", verbose=True, progress=False, within=None,
+        source="taxonomicon",
     )
 
 

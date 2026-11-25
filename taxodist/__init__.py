@@ -1,10 +1,14 @@
 """
 taxodist: Taxonomic Hierarchy Distances and Lineage Analysis
 
-taxodist computes distances between taxonomic hierarchy nodes using
-hierarchical lineage data retrieved from The Taxonomicon
-(taxonomy.nl), a comprehensive curated classification of all life
-based on Systema Naturae 2000.
+taxodist computes distances between taxonomic hierarchy nodes from ordered
+lineages retrieved from one of three taxonomic sources: The Taxonomicon
+(taxonomy.nl, the default), the Open Tree of Life reference taxonomy, and
+the NCBI Taxonomy. The source is chosen with ``taxo_resolve(source=...)``
+(``"taxonomicon"``, ``"ott"``, or ``"ncbi"``); name-based functions such as
+get_lineage() and taxo_distance() query The Taxonomicon, and resolutions
+from any source can be passed to the matrix, tree, bundle, and community
+functions. Curated lineages can be used offline with taxo_from_lineages().
 
 Core functions
 --------------
@@ -33,6 +37,16 @@ Core functions
 - compare_bundles() — report what changed between two analyses
 - taxo_distinctness() / taxo_distinctness_test() — Warwick and Clarke's
   taxonomic diversity and distinctness indices, and their randomization test
+- taxo_dissimilarity() — taxonomic dissimilarities Gamma+ and Theta+ between
+  samples (Clarke, Somerfield and Chapman 2006)
+- taxo_ses() — standardized effect sizes of MPD and MNTD (NRI and NTI)
+- taxo_sources() — the supported taxonomic sources (The Taxonomicon, the Open
+  Tree Taxonomy, and the NCBI Taxonomy; ``taxo_resolve(source=...)``)
+- compare_sources() — compare distances across taxonomic sources
+- taxo_search() — list the Taxonomicon entries matching a name
+- taxo_path(), taxo_cluster(), taxo_ordinate(), taxo_heatmap() — paths,
+  clustering, ordination, and heatmaps
+- save_cache() / load_cache() — persist the lineage cache
 
 Requests to The Taxonomicon are retried after transient failures; set
 ``taxodist.fetch.MAX_TRIES`` to change the number of attempts (default 3).
@@ -58,17 +72,28 @@ nodes), ``"wu_palmer"`` (1 - 2 depth(MRCA) / (depth(A) + depth(B))), and
 ``"ranked"`` (half the path through the standard Linnaean ranks listed in
 ``taxodist.distance.RANK_LEVELS``; Clarke and Warwick's step weights).
 
-Data source
------------
-All lineage data is sourced from The Taxonomicon (taxonomy.nl), based on
-Systema Naturae 2000 by S.J. Brands (1989 onwards). Please cite this
-resource when using taxodist in published work.
+Data sources
+------------
+Lineages come from The Taxonomicon (the default), the Open Tree Taxonomy
+(``source="ott"``; identifiers ``"ott:<id>"``), or the NCBI Taxonomy
+(``source="ncbi"``; identifiers ``"ncbi:<id>"``). NCBI requests are spaced
+by at least 0.4 s (0.12 s with an API key set in the ``NCBI_API_KEY``
+environment variable or ``taxodist.sources.NCBI_API_KEY``). Please cite the
+source of the classification used, as well as taxodist, in published work;
+taxo_sources() lists the citations.
 
 References
 ----------
-Brands, S.J. (1989 onwards). Systema Naturae 2000. Amsterdam,
-The Netherlands. Retrieved from The Taxonomicon,
-http://taxonomicon.taxonomy.nl.
+Brands, S.J. (ed.) 1989-present. The Taxonomicon. Universal Taxonomic
+Services, Zwaag, The Netherlands. http://taxonomicon.taxonomy.nl.
+
+Rees, J.A. & Cranston, K. (2017). Automated assembly of a reference
+taxonomy for phylogenetic data synthesis. Biodiversity Data Journal 5:
+e12581. https://doi.org/10.3897/BDJ.5.e12581
+
+Schoch, C.L. et al. (2020). NCBI Taxonomy: a comprehensive update on
+curation, resources and tools. Database 2020: baaa062.
+https://doi.org/10.1093/database/baaa062
 """
 
 from ._version import __version__
@@ -93,6 +118,10 @@ from .distinctness import (
     print_taxodist_distinctness,
 )
 
+from .community import taxo_dissimilarity, taxo_ses, print_taxodist_ses
+
+from .sources import TaxodistSourceComparison, taxo_sources, compare_sources
+
 from .tree import TaxodistTree, taxo_tree
 
 from .utils import (
@@ -113,3 +142,36 @@ from .bundle import (
     read_taxodist_bundle,
     compare_bundles,
 )
+
+__all__ = [
+    "__version__",
+    # retrieval, resolution, and cache
+    "clear_cache", "save_cache", "load_cache", "cache_info",
+    "get_taxonomicon_id", "get_lineage_by_id", "get_lineage", "lineage_ranks",
+    "taxo_search", "TaxodistResolution", "taxo_resolve", "taxo_from_lineages",
+    "taxonomicon_available",
+    # distances
+    "METRICS",
+    "taxo_distance", "mrca", "distance_matrix", "cross_distances",
+    "closest_relative", "focal_distances", "lineage_depth", "check_coverage",
+    "taxo_cluster", "taxo_ordinate",
+    # distinctness and community analyses
+    "TaxodistDistinctnessTest", "taxo_distinctness", "taxo_distinctness_test",
+    "print_taxodist_distinctness",
+    "taxo_dissimilarity", "taxo_ses", "print_taxodist_ses",
+    # taxonomic sources
+    "TaxodistSourceComparison", "taxo_sources", "compare_sources",
+    # trees
+    "TaxodistTree", "taxo_tree",
+    # lineage utilities and plots
+    "compare_lineages", "shared_clades", "is_member", "filter_clade",
+    "taxo_heatmap", "taxo_path",
+    "print_taxodist_result", "plot_taxodist_cluster", "plot_taxodist_ord",
+    "summary_taxodist_ord", "print_taxodist_path", "print_focal_distances",
+    # reference data
+    "load_taxobase",
+    # bundles
+    "TaxodistBundle", "TaxodistBundleComparison", "taxo_bundle",
+    "validate_taxodist_bundle", "write_taxodist_bundle", "read_taxodist_bundle",
+    "compare_bundles",
+]

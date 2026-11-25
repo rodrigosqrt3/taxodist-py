@@ -164,7 +164,7 @@ def test_importing_taxodist_does_not_import_plotting_libraries():
 
 # (7) Provenance of concatenated resolutions ------------------------------------
 
-def test_concat_keeps_shared_provenance_and_bundle_does_not_mislabel():
+def test_concat_keeps_shared_provenance_and_bundle_defaults_like_r():
     first = taxodist.taxo_from_lineages({"Alpha": LINEAGES["Alpha"]}, source="Curated")
     second = taxodist.taxo_from_lineages({"Beta": LINEAGES["Beta"]}, source="Curated")
     combined = pd.concat([first, second], ignore_index=True)
@@ -176,8 +176,10 @@ def test_concat_keeps_shared_provenance_and_bundle_does_not_mislabel():
     other = taxodist.taxo_from_lineages({"Gamma": LINEAGES["Gamma"]}, source="Other")
     mixed = pd.concat([first, other], ignore_index=True)
     assert mixed.source is None
-    with pytest.raises(ValueError, match="no source provenance"):
-        taxodist.taxo_bundle(mixed, progress=False)
+    # As in R, a resolution without a source is labelled The Taxonomicon.
+    assert taxodist.taxo_bundle(mixed, progress=False).source["name"] == "The Taxonomicon"
+    mixed.source = "Curated and Other"
+    assert taxodist.taxo_bundle(mixed, progress=False).source["name"] == "Curated and Other"
 
 
 # (11) Numeric IDs ------------------------------------------------------------------
@@ -264,4 +266,4 @@ def test_version_is_single_sourced():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'dynamic = ["version"]' in pyproject
     assert 'version = {attr = "taxodist._version.__version__"}' in pyproject
-    assert taxodist.__version__ == "1.0.0"
+    assert taxodist.__version__ == "1.1.0"

@@ -105,12 +105,13 @@ def _metric_from_spec(spec):
 
 
 def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True, within=None,
-                metric="reciprocal"):
+                metric="reciprocal", source="taxonomicon"):
     """
     Combine resolution, distances, metric definition, and provenance.
 
-    ``ambiguity``, ``verbose``, ``progress``, and ``within`` are passed to
-    ``taxo_resolve()`` when ``taxa`` is a sequence of names. ``metric`` is the
+    ``ambiguity``, ``verbose``, ``progress``, ``within``, and ``source`` (the
+    taxonomic source; see taxo_sources()) are passed to ``taxo_resolve()``
+    when ``taxa`` is a sequence of names. ``metric`` is the
     distance metric of the stored matrix (see taxo_distance()); the bundle
     records it (with the rank levels for ``"ranked"``), so the matrix can be
     verified from the stored lineages and ranks.
@@ -128,27 +129,15 @@ def taxo_bundle(taxa, ambiguity="warn", verbose=False, progress=True, within=Non
             verbose=verbose,
             progress=progress,
             within=within,
+            source=source,
         )
     )
     source_name = getattr(resolution, "source", None)
-    if source_name is None or pd.isna(source_name) or not str(source_name).strip():
+    if source_name is None or pd.isna(source_name) or str(source_name) == "":
         # As in R, a resolution without a recorded source is assumed to come
-        # from The Taxonomicon. pd.concat() and other pandas operations can
-        # drop the provenance, so this default is only applied when every
-        # selected ID is a Taxonomicon ID; otherwise the source is unknown and
-        # labelling it would be wrong.
-        ids = [
-            identifier for identifier in resolution["id"]
-            if identifier is not None and not pd.isna(identifier)
-        ]
-        if not all(str(identifier).isdigit() for identifier in ids):
-            raise ValueError(
-                "The resolution has no source provenance (for example after "
-                "pd.concat() of resolutions from different sources) and its "
-                "IDs are not Taxonomicon IDs. Set `resolution.source` (and "
-                "`resolution.source_url`, `resolution.retrieved_at`) before "
-                "calling taxo_bundle()."
-            )
+        # from The Taxonomicon, whatever its IDs. pd.concat() of resolutions
+        # from different sources leaves the source unset: set
+        # `resolution.source` before bundling such a resolution.
         source_name = "The Taxonomicon"
     source_url = getattr(resolution, "source_url", None)
     if source_url is None and source_name == "The Taxonomicon":
@@ -487,11 +476,24 @@ class TaxodistBundleComparison(dict):
             f"* Taxa compared: {len(taxa)} ({len(changed)} changed)",
             f"* Distances changed: {len(self['distances'])}",
         ]
+        if self.get("metric_changed"):
+            if self.get("metric_old") == self.get("metric_new"):
+                lines.append(
+                    "! The bundles use different rank levels for the "
+                    f"\"{self['metric_new']}\" metric."
+                )
+            else:
+                lines.append(
+                    "! The bundles use different metrics: "
+                    f"\"{self['metric_old']}\" and \"{self['metric_new']}\"."
+                )
         if changed.empty:
             lines.append("No taxon changed between the two bundles.")
         else:
             lines.extend(f"> {row.input}: {row.change}" for row in changed.itertuples())
         return "\n".join(lines)
+
+    __repr__ = __str__
 
 
 def compare_bundles(old, new, tolerance=math.sqrt(np.finfo(float).eps)):
@@ -521,6 +523,12 @@ def compare_bundles(old, new, tolerance=math.sqrt(np.finfo(float).eps)):
           whose distance changed (taxon_a, taxon_b, distance_old,
           distance_new).
         - created_old, created_new: creation timestamps.
+        - metric_old, metric_new: the distance metric of each bundle
+          (``"reciprocal"``, ``"path"``, ``"wu_palmer"``, or ``"ranked"``).
+        - metric_changed: True if the bundles use different metrics, or the
+          ``"ranked"`` metric with different rank levels. Their distances are
+          then not comparable, and every pair is usually reported as
+          changed; printing the comparison shows a warning.
     """
     def as_bundle(value, name):
         if isinstance(value, (str, os.PathLike)):
@@ -611,9 +619,14 @@ def compare_bundles(old, new, tolerance=math.sqrt(np.finfo(float).eps)):
         columns=["taxon_a", "taxon_b", "distance_old", "distance_new"],
     )
 
+    metric_old = _metric_from_spec(old["metric"])
+    metric_new = _metric_from_spec(new["metric"])
     return TaxodistBundleComparison(
         taxa=taxa,
         distances=distances,
         created_old=old["created_at"],
         created_new=new["created_at"],
+        metric_old=metric_old[0],
+        metric_new=metric_new[0],
+        metric_changed=metric_old != metric_new,
     )

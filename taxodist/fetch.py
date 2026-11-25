@@ -28,8 +28,12 @@ _PARSER_VERSION_KEY = "meta_parser_version"
 # requests.get() creates a short-lived Session for every call, whereas a
 # persistent Session reuses the connection pool for the many requests made by
 # name resolution and lineage retrieval.
+#: HTTP user agent, in the format shared by the R, Python, and Julia
+#: implementations: ``taxodist/<version> (<language>; +<homepage>)``.
+USER_AGENT = f"taxodist/{__version__} (Python; +https://taxodist.github.io)"
+
 _http_session = requests.Session()
-_http_session.headers.update({"User-Agent": f"taxodist Python package/{__version__}"})
+_http_session.headers.update({"User-Agent": USER_AGENT})
 
 #: Number of attempts made for each request to The Taxonomicon. Network errors
 #: and server errors (5xx) are retried with exponential backoff; client errors
@@ -44,7 +48,9 @@ MIN_INTERVAL = 0.25
 
 _sleep = time.sleep
 _throttle_sleep = time.sleep
-_last_request = None
+#: Time of the last request to each source (host), which are spaced
+#: independently.
+_last_request = {}
 
 _ASTRONOMICAL_PATTERN = (
     r"\bastronomical\b|\bplanet\b|\bMinor planet\b|\bcomet\b|\basteroid\b"
@@ -100,10 +106,14 @@ def taxonomicon_available(timeout=3):
     return response.status_code == 200
 
 
-def _throttle():
-    """Wait until ``MIN_INTERVAL`` seconds have passed since the last request."""
-    global _last_request
-    interval = MIN_INTERVAL
+def _throttle(source="taxonomicon", interval=None):
+    """
+    Wait until ``interval`` seconds (default ``MIN_INTERVAL``) have passed
+    since the last request to ``source``. Each source is spaced
+    independently.
+    """
+    if interval is None:
+        interval = MIN_INTERVAL
     if (
         isinstance(interval, bool)
         or not isinstance(interval, numbers.Real)
@@ -111,12 +121,35 @@ def _throttle():
         or interval <= 0
     ):
         return None
-    if _last_request is not None:
-        wait = interval - (time.monotonic() - _last_request)
+    last = _last_request.get(source)
+    if last is not None:
+        wait = interval - (time.monotonic() - last)
         if wait > 0:
             _throttle_sleep(wait)
-    _last_request = time.monotonic()
+    _last_request[source] = time.monotonic()
     return None
+
+
+def _outermost_candidates(lineages):
+    """
+    Candidates nested in another candidate of the same name, such as the
+    nominotypical subgenus Mus (Mus) inside the genus Mus, are not homonyms:
+    only the outermost is kept. A candidate is dropped when the lineage of
+    another candidate is a proper prefix of its own. Candidates without a
+    lineage (None) are kept. Returns one boolean per lineage.
+    """
+    keep = []
+    for i, li in enumerate(lineages):
+        if li is None:
+            keep.append(True)
+            continue
+        nested = any(
+            j != i and lj is not None and len(lj) < len(li)
+            and list(li[:len(lj)]) == list(lj)
+            for j, lj in enumerate(lineages)
+        )
+        keep.append(not nested)
+    return keep
 
 
 def _regex_escape(x):
@@ -168,9 +201,27 @@ def _http_get(url):
         _sleep(min(2 ** (attempt - 1), 5))
 
 
+#: Horizontal and vertical whitespace, as PCRE's ``[\h\v]`` used by R:
+#: ASCII spaces, tabs, and line breaks, the no-break space, and the Unicode
+#: space separators (thin space, ideographic space, ...).
+_UNICODE_SPACE = (
+    "[\t\n\x0b\x0c\r \x85\xa0 ᠎ - "
+    "    　]"
+)
+_UNICODE_SPACE_RUN = re.compile(_UNICODE_SPACE + "+")
+_UNICODE_SPACE_EDGES = re.compile(rf"\A{_UNICODE_SPACE}+|{_UNICODE_SPACE}+\Z")
+
+
 def _normalize_taxon(taxon):
-    """Trim and collapse whitespace so equivalent spellings share a cache key."""
-    return re.sub(r"\s+", " ", str(taxon)).strip()
+    """
+    Trim and collapse whitespace so equivalent spellings share a cache key.
+
+    Unicode whitespace, such as the no-break space (U+00A0) or the thin space
+    (U+2009), counts as whitespace, as in R: leading and trailing runs are
+    removed and inner runs become one ASCII space.
+    """
+    trimmed = _UNICODE_SPACE_EDGES.sub("", str(taxon))
+    return _UNICODE_SPACE_RUN.sub(" ", trimmed)
 
 
 def _search_url(taxon):
@@ -907,6 +958,10 @@ def _lookup_taxonomicon_id(taxon, verbose=False):
         ]
         if matched:
             bio_ids = matched
+        # As in taxo_resolve(): a nominotypical subgenus or subspecies nested
+        # in a candidate of the same name is not a homonym.
+        outer = _outermost_candidates([entry["lineage"] for entry in bio_ids])
+        bio_ids = [entry for entry, keep in zip(bio_ids, outer) if keep]
         preferred = _candidate_order([entry["name"] for entry in bio_ids])
         bio_ids = [bio_ids[i] for i in preferred]
 
@@ -1096,7 +1151,9 @@ def get_lineage(taxon, clean=True, verbose=False):
 
     A convenience wrapper that combines get_taxonomicon_id() and
     get_lineage_by_id() into a single call. Given a taxon name, returns
-    its complete lineage from root to tip.
+    its complete lineage from root to tip in The Taxonomicon. For the Open
+    Tree or NCBI taxonomies, use ``taxo_resolve(taxa, source="ott")`` or
+    ``source="ncbi"``; the ``lineage`` column holds the lineages.
 
     Parameters
     ----------
@@ -1370,7 +1427,8 @@ def _make_resolution(rows, source, source_url, retrieved_at=None, ranks=True):
     return frame
 
 
-def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=None):
+def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=None,
+                 source="taxonomicon"):
     """
     Resolve names or numeric Taxonomicon IDs into an auditable table.
 
@@ -1387,7 +1445,16 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
         candidates whose lineage contains this clade are considered, which
         resolves many cross-kingdom homonyms automatically. Matching is exact
         and case-insensitive. Names without a candidate inside the clade are
-        reported as ``"unresolved"``. Numeric IDs are not filtered.
+        reported as ``"unresolved"``. Numeric IDs are not filtered. Clade
+        names depend on the source (e.g. ``"Animalia"`` in The Taxonomicon,
+        ``"Metazoa"`` in the Open Tree and NCBI taxonomies).
+    source : str
+        The taxonomic source: ``"taxonomicon"`` (default), ``"ott"`` (Open
+        Tree Taxonomy), or ``"ncbi"`` (NCBI Taxonomy); see taxo_sources().
+        Identifiers of the other sources carry a prefix (``"ott:770309"``,
+        ``"ncbi:9606"``), which may be omitted in the input when ``source``
+        is set. The resolution records the source (``.source``, with the
+        version of the Open Tree Taxonomy) and its URL (``.source_url``).
 
     Returns
     -------
@@ -1402,9 +1469,15 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
     Names are matched after trimming and collapsing whitespace, and the stored
     lineage is truncated at the queried taxon exactly as in ``get_lineage()``,
     so ``distance_matrix(taxo_resolve(x))`` and ``distance_matrix(x)`` agree.
+    A candidate nested in another candidate of the same name, such as the
+    nominotypical subgenus Mus (Mus) inside the genus Mus, is not counted as a
+    homonym.
     """
+    from .sources import _match_source, _resolve_external, _source_metadata
+
     if ambiguity not in {"warn", "first", "error"}:
         raise ValueError("ambiguity must be 'warn', 'first', or 'error'")
+    source = _match_source(source)
     if isinstance(taxa, (str, bytes, Mapping)) or not isinstance(taxa, Iterable):
         raise TypeError("taxa must be a sequence of strings")
     taxa = list(taxa)
@@ -1503,6 +1576,13 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
                     for lineage, keep in zip(candidate_lineages, exact)
                     if keep
                 ]
+            # A nominotypical subgenus or subspecies nested in a candidate of
+            # the same name is not a homonym.
+            outer = _outermost_candidates(candidate_lineages)
+            candidates = candidates.loc[outer].reset_index(drop=True)
+            candidate_lineages = [
+                lineage for lineage, keep in zip(candidate_lineages, outer) if keep
+            ]
             preferred = _candidate_order(list(candidates["name"]))
             candidates = candidates.iloc[preferred].reset_index(drop=True)
             candidate_lineages = [candidate_lineages[i] for i in preferred]
@@ -1530,20 +1610,28 @@ def taxo_resolve(taxa, ambiguity="warn", verbose=False, progress=True, within=No
     keys = [_normalize_taxon(taxon) for taxon in taxa]
     unique_keys = list(dict.fromkeys(keys))
     resolved_unique = {}
-    for index, key in enumerate(unique_keys, start=1):
-        resolved_unique[key] = resolve_one(key)
-        if progress:
-            print(f"Resolving taxa [{index}/{len(unique_keys)}]: {key}")
+    if source == "taxonomicon":
+        for index, key in enumerate(unique_keys, start=1):
+            resolved_unique[key] = resolve_one(key)
+            if progress:
+                print(f"Resolving taxa [{index}/{len(unique_keys)}]: {key}")
+    else:
+        records = _resolve_external(
+            unique_keys, source, within_clade, verbose=verbose,
+            progress=progress, failed=failed,
+        )
+        resolved_unique = dict(zip(unique_keys, records))
 
     rows = []
     for taxon, key in zip(taxa, keys):
         row = resolved_unique[key].copy()
         row["input"] = taxon
         rows.append(row)
+    metadata = _source_metadata(source)
     result = _make_resolution(
         rows,
-        source="The Taxonomicon",
-        source_url="http://taxonomicon.taxonomy.nl",
+        source=metadata["name"],
+        source_url=metadata["url"],
     )
     ambiguous = result.loc[result["status"] == "ambiguous"]
     if not ambiguous.empty:

@@ -24,9 +24,16 @@ RANK_LEVELS = list(_DEFAULT_RANK_LEVELS)
 
 
 def _match_metric(metric):
-    """Validate a metric name and return it."""
+    """
+    Validate a metric name and return it. As in R, ``metric`` must be a
+    single string: lists, tuples, arrays, None, and numbers raise TypeError.
+    """
     if not isinstance(metric, str):
-        raise TypeError(f"metric must be one of {', '.join(map(repr, METRICS))}")
+        raise TypeError(
+            "metric must be a single string, one of "
+            f"{', '.join(map(repr, METRICS[:-1]))}, or {METRICS[-1]!r}; "
+            f"got {type(metric).__name__}"
+        )
     if metric not in METRICS:
         raise ValueError(
             f"Unknown distance metric {metric!r}. "
@@ -231,7 +238,9 @@ def taxo_distance(taxon_a, taxon_b, verbose=False, metric="reciprocal"):
     The deeper the shared ancestor, the smaller (closer to zero) the distance.
     This metric ensures that taxa diverging at the same node are always
     equidistant from any third taxon, regardless of lineage depth differences
-    below the split.
+    below the split. For the Open Tree or NCBI taxonomies, resolve the taxa
+    with ``taxo_resolve(taxa, source="ott")`` (or ``"ncbi"``) and pass the
+    resolution to distance_matrix().
 
     Metrics
     -------
@@ -336,8 +345,10 @@ def distance_matrix(taxa, verbose=False, progress=True, metric="reciprocal"):
     Parameters
     ----------
     taxa : sequence of str, TaxodistResolution, or TaxodistBundle
-        Taxon names are retrieved normally. Resolution objects reuse their
-        stored lineages (and ranks) and preserve their input labels. Bundles
+        Taxon names are retrieved from The Taxonomicon. Resolution objects,
+        from any source (``taxo_resolve(taxa, source="ott")`` or
+        ``source="ncbi"``), reuse their stored lineages (and ranks) and
+        preserve their input labels. Bundles
         return their validated stored matrix without network access or
         recomputation.
     verbose : bool
@@ -380,12 +391,12 @@ def _distance_matrix_impl(taxa, verbose, progress, metric, levels):
 
     if progress:
         print(f"Computing distances for {n * (n - 1) // 2} pairs...")
-    mat = _distance_block(lineages, lineages, metric)
+    mat = _pairwise_block(lineages, metric)
     np.fill_diagonal(mat, 0.0)
     if progress:
         print("Done.")
 
-    result = pd.DataFrame(mat, index=labels, columns=labels)
+    result = pd.DataFrame(mat, index=labels, columns=labels, copy=False)
     result.attrs["metric"] = metric
     return result
 
@@ -402,7 +413,9 @@ def cross_distances(x, y, verbose=False, progress=True, metric="reciprocal"):
     Parameters
     ----------
     x, y : sequence of str, TaxodistResolution, or TaxodistBundle
-        Taxon names, or resolutions whose stored lineages are reused.
+        Taxon names (retrieved from The Taxonomicon), or resolutions from
+        any source whose stored lineages are reused. Distances are only
+        meaningful when both come from the same source.
     verbose : bool
         If True, prints retrieval messages.
     progress : bool
@@ -534,27 +547,106 @@ def _prefix_node_ids(lineages):
     return ids, np.asarray(lengths, dtype=np.int64)
 
 
+def _mrca_index(ids, lengths):
+    """
+    Index for MRCA-depth queries (the equivalent of R's ``.mrca_index()``).
+
+    Lineages are sorted lexicographically by their node identifiers from
+    _prefix_node_ids() (a missing depth, ``-1``, sorts before every node, so
+    a lineage precedes its descendants). In that order the common prefix of
+    two lineages is the minimum of the common prefixes of all adjacent pairs
+    between them, as in the LCP table of a suffix array, so the depths from
+    one lineage to all others follow from two cumulative minima.
+
+    Returns a dict with ``order`` (lineage at each sorted position), ``pos``
+    (sorted position of each lineage), ``adj`` (common prefix of sorted
+    neighbours, length ``n - 1``), ``lens`` (lineage lengths), and ``n``.
+    """
+    ids = np.asarray(ids, dtype=np.int64)
+    n = ids.shape[0]
+    if n < 2 or ids.shape[1] == 0:
+        order = np.arange(n)
+        adj = np.zeros(max(n - 1, 0), dtype=np.int64)
+    else:
+        # np.lexsort uses the last key as the primary one.
+        order = np.lexsort(ids.T[::-1])
+        ranked = ids[order]
+        adj = ((ranked[1:] == ranked[:-1]) & (ranked[1:] >= 0)).sum(axis=1)
+    pos = np.empty(n, dtype=np.int64)
+    pos[order] = np.arange(n)
+    return {
+        "order": order,
+        "pos": pos,
+        "adj": np.asarray(adj, dtype=np.int64),
+        "lens": np.asarray(lengths, dtype=np.int64),
+        "n": n,
+    }
+
+
+def _mrca_depths_from(index, j):
+    """
+    MRCA depths from lineage ``j`` to every lineage of ``index``, in input
+    order. The depth of a lineage with itself is its length.
+    """
+    n = index["n"]
+    adj = index["adj"]
+    p = index["pos"][j]
+    depths = np.empty(n, dtype=np.int64)
+    depths[p] = index["lens"][j]
+    if p < n - 1:
+        depths[p + 1:] = np.minimum.accumulate(adj[p:])
+    if p > 0:
+        depths[p - 1::-1] = np.minimum.accumulate(adj[p - 1::-1])
+    return depths[index["pos"]]
+
+
 def _distance_block(lineages_a, lineages_b, metric="reciprocal"):
     """
-    Vectorized distances between every lineage in ``a`` and ``b``. For the
-    ``"ranked"`` metric the lineages must already be reduced with
-    ``_metric_lineages()``.
+    Distances between every lineage in ``a`` (rows) and ``b`` (columns),
+    from a sorted-prefix MRCA index of both sets (see _mrca_index()). For
+    the ``"ranked"`` metric the lineages must already be reduced with
+    ``_metric_lineages()``. Missing (None) lineages give NaN.
     """
-    ids, lengths = _prefix_node_ids(list(lineages_a) + list(lineages_b))
+    lineages_a = list(lineages_a)
+    lineages_b = list(lineages_b)
     n_a = len(lineages_a)
-    ids_a, ids_b = ids[:n_a], ids[n_a:]
-    len_a, len_b = lengths[:n_a], lengths[n_a:]
+    return _indexed_distances(
+        lineages_a + lineages_b, range(n_a), slice(n_a, None), metric
+    )
 
-    out = np.full((n_a, len(lineages_b)), np.nan)
-    for column in range(len(lineages_b)):
-        shared = (ids_a == ids_b[column]) & (ids_a >= 0)
-        mrca_depth = shared.sum(axis=1)
-        out[:, column] = _metric_values(mrca_depth, len_a, len_b[column], metric)
 
-    missing_a = np.array([lineage is None for lineage in lineages_a], dtype=bool)
-    missing_b = np.array([lineage is None for lineage in lineages_b], dtype=bool)
-    out[missing_a, :] = np.nan
-    out[:, missing_b] = np.nan
+def _pairwise_block(lineages, metric="reciprocal"):
+    """
+    Square matrix of distances between ``lineages`` from one MRCA index (the
+    equivalent of R's ``.pairwise_distances()``). The diagonal holds the
+    distance of each lineage to itself (0, or NaN for a missing lineage).
+    """
+    lineages = list(lineages)
+    return _indexed_distances(lineages, range(len(lineages)), slice(None), metric)
+
+
+def _indexed_distances(lineages, rows, columns, metric):
+    """
+    Distances from the lineages ``rows`` (a range) to the lineages selected
+    by the slice ``columns``, all taken from one MRCA index of ``lineages``.
+    Rows are computed in blocks of about a million cells, so that the metric
+    is evaluated on whole blocks; distances are symmetric, so the value for
+    (i, j) is computed from the depths of row i.
+    """
+    ids, lengths = _prefix_node_ids(lineages)
+    index = _mrca_index(ids, lengths)
+    missing = np.array([lineage is None for lineage in lineages], dtype=bool)
+    col_lengths = lengths[columns]
+    out = np.empty((len(rows), len(col_lengths)))
+    block = max(1, 2 ** 20 // max(len(col_lengths), 1))
+    for start in range(0, len(rows), block):
+        chunk = rows[start:start + block]
+        depths = np.stack([_mrca_depths_from(index, row)[columns] for row in chunk])
+        out[start:start + len(chunk)] = _metric_values(
+            depths, lengths[chunk.start:chunk.stop, None], col_lengths[None, :], metric
+        )
+    out[missing[rows.start:rows.stop], :] = np.nan
+    out[:, missing[columns]] = np.nan
     return out
 
 
@@ -609,7 +701,7 @@ def closest_relative(taxon, candidates, verbose=False, metric="reciprocal"):
             results.append({"taxon": cand, "distance": dist_result["distance"]})
 
     df = pd.DataFrame(results)
-    return df.sort_values(by="distance", na_position='last').reset_index(drop=True)
+    return df.sort_values(by="distance", na_position="last", kind="stable").reset_index(drop=True)
 
 def focal_distances(focal, community, verbose=False, progress=True,
                     metric="reciprocal"):
@@ -699,7 +791,7 @@ def focal_distances(focal, community, verbose=False, progress=True,
     df["distance"] = df["distance"].astype("float64")
     # Nullable integers, as for an empty community.
     df["mrca_depth"] = pd.array(df["mrca_depth"], dtype="Int64")
-    df = df.sort_values(by="distance", na_position="last").reset_index(drop=True)
+    df = df.sort_values(by="distance", na_position="last", kind="stable").reset_index(drop=True)
     df.attrs["focal"] = focal
     return df
 
@@ -773,8 +865,12 @@ def taxo_cluster(taxa, method="average", **kwargs):
         Taxon names, a resolution or bundle (passed to distance_matrix()), or
         a distance matrix DataFrame from distance_matrix().
     method : str
-        Clustering method passed to scipy.cluster.hierarchy.linkage().
-        Default "average" (UPGMA), which works well with taxonomic distances.
+        Clustering method of R's ``stats::hclust()``: ``"average"`` (the
+        default, UPGMA, which works well with taxonomic distances),
+        ``"single"``, ``"complete"``, ``"mcquitty"`` (WPGMA), ``"median"``
+        (WPGMC), ``"centroid"`` (UPGMC), ``"ward.D"``, or ``"ward.D2"``.
+        As in R, ``"ward"`` means ``"ward.D"`` (with a message) and unique
+        abbreviations are accepted.
     verbose : bool
         Logical. If True, prints progress messages. Default False.
     progress : bool
@@ -787,9 +883,29 @@ def taxo_cluster(taxa, method="average", **kwargs):
     -------
     dict
         A dictionary with:
-        - hclust: The hierarchical clustering linkage matrix (SciPy format).
+        - hclust: The clustering as a SciPy linkage matrix (leaf ``j`` is
+          row ``j`` of ``dist``; the cluster of step ``k`` is ``n + k``,
+          0-based), usable with ``scipy.cluster.hierarchy.dendrogram()``,
+          ``fcluster()``, or ``to_tree()``. Its left/right children follow
+          R, so the dendrogram leaf order equals ``order``. Heights are not
+          necessarily monotone for ``"median"`` and ``"centroid"``.
+        - merge: R's ``hclust$merge``, an ``(n - 1, 2)`` integer array in
+          which ``-j`` is taxon ``j`` (1-based) and a positive ``k`` the
+          cluster formed at step ``k``.
+        - height: R's ``hclust$height``, the merge heights.
+        - order: R's ``hclust$order``, the 1-based leaf order of the
+          dendrogram (``dist.index[order - 1]`` gives the labels).
+        - labels: The taxon labels (``dist.index``).
         - dist: The underlying distance matrix DataFrame.
-        - method: The linkage method used.
+        - method: The clustering method (its full name, as R's
+          ``hclust$method``, when clustering was done).
+
+        The clustering is a port of the Fortran code of R's
+        ``stats::hclust()``: merges, heights, and order are identical to R's
+        for every method, including tied distances (SciPy's ``linkage()``
+        breaks ties differently and lacks ``"ward.D"`` and ``"mcquitty"``).
+        When clustering is skipped (with a warning), ``hclust``, ``merge``,
+        ``height``, and ``order`` are None.
     """
     # A TaxodistResolution is a DataFrame subclass but not a distance matrix:
     # like names and bundles, it is passed through distance_matrix().
@@ -798,25 +914,34 @@ def taxo_cluster(taxa, method="average", **kwargs):
     else:
         d = distance_matrix(taxa, **kwargs)
 
+    skipped = {
+        "hclust": None, "merge": None, "height": None, "order": None,
+        "labels": list(d.index), "dist": d, "method": method,
+    }
     if np.isnan(d.values).any():
         warnings.warn("Distance matrix contains NaN values (taxa not found or server offline). Clustering skipped.")
-        return {"hclust": None, "dist": d, "method": method}
+        return skipped
 
     if not np.isfinite(d.values).all():
         warnings.warn("Distance matrix contains infinite values (no shared ancestor). Clustering skipped.")
-        return {"hclust": None, "dist": d, "method": method}
+        return skipped
 
     if d.shape[0] < 2:
         warnings.warn("At least two taxa are required for clustering. Clustering skipped.")
-        return {"hclust": None, "dist": d, "method": method}
+        return skipped
 
-    from scipy.cluster.hierarchy import linkage
-    from scipy.spatial.distance import squareform
+    from ._hclust import r_hclust
 
-    condensed_dist = squareform(d.values, checks=False)
-    hc = linkage(condensed_dist, method=method)
-
-    return {"hclust": hc, "dist": d, "method": method}
+    hc = r_hclust(d.to_numpy(dtype=float), method=method)
+    return {
+        "hclust": hc["linkage"],
+        "merge": hc["merge"],
+        "height": hc["height"],
+        "order": hc["order"],
+        "labels": list(d.index),
+        "dist": d,
+        "method": hc["method"],
+    }
 
 def taxo_ordinate(taxa, k=2, **kwargs):
     """
