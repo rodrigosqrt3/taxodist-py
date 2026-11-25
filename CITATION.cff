@@ -1,16 +1,23 @@
 cff-version: 1.2.0
-message: "If you use taxodist, please cite the software and The Taxonomicon."
+message: "If you use taxodist, please cite the software and the taxonomic source of the lineages (The Taxonomicon, the Open Tree Taxonomy, or the NCBI Taxonomy)."
 title: "taxodist: Taxonomic Hierarchy Distances and Lineage Analysis"
 type: software
 authors:
   - family-names: "Villa"
     given-names: "Rodrigo Fonseca"
     orcid: "https://orcid.org/0009-0005-2938-2270"
-version: 1.0.0
-date-released: 2026-11-04
+version: 1.1.0
+date-released: 2026-11-25
 repository-code: "https://github.com/rodrigosqrt3/taxodist-py"
-url: "https://rodrigosqrt3.github.io/taxodist-web/"
+url: "https://taxodist.github.io/"
 license: GPL-3.0-or-later
+keywords:
+  - taxonomy
+  - biodiversity
+  - Python
+  - taxonomic distance
+  - taxonomic distinctness
+  - lineage analysis
 
 preferred-citation:
   type: software
@@ -19,6 +26,46 @@ preferred-citation:
     - family-names: "Villa"
       given-names: "Rodrigo Fonseca"
       orcid: "https://orcid.org/0009-0005-2938-2270"
-  version: 1.0.0
+  version: 1.1.0
   year: 2026
-  url: "https://rodrigosqrt3.github.io/taxodist-web/"
+  url: "https://taxodist.github.io/"
+  repository-code: "https://github.com/rodrigosqrt3/taxodist-py"
+
+references:
+  - type: database
+    title: "The Taxonomicon"
+    authors:
+      - family-names: "Brands"
+        given-names: "S.J."
+    publisher:
+      name: "Universal Taxonomic Services"
+      city: "Zwaag"
+      country: NL
+    year: 1989
+    url: "http://taxonomicon.taxonomy.nl"
+    notes: "Brands, S.J. (ed.) 1989-present. The Taxonomicon. Default source of lineages (source=\"taxonomicon\")."
+  - type: article
+    title: "Automated assembly of a reference taxonomy for phylogenetic data synthesis"
+    authors:
+      - family-names: "Rees"
+        given-names: "Jonathan A."
+      - family-names: "Cranston"
+        given-names: "Karen"
+    journal: "Biodiversity Data Journal"
+    volume: 5
+    start: "e12581"
+    year: 2017
+    doi: "10.3897/BDJ.5.e12581"
+    notes: "Open Tree Taxonomy (source=\"ott\")."
+  - type: article
+    title: "NCBI Taxonomy: a comprehensive update on curation, resources and tools"
+    authors:
+      - family-names: "Schoch"
+        given-names: "Conrad L."
+      - name: "et al."
+    journal: "Database"
+    volume: 2020
+    start: "baaa062"
+    year: 2020
+    doi: "10.1093/database/baaa062"
+    notes: "NCBI Taxonomy (source=\"ncbi\")."

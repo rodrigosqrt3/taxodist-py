@@ -10,17 +10,17 @@ authors = [
 ]
 description = "Taxonomic hierarchy distances and lineage analysis"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
 keywords = [
     "taxonomy", "biodiversity", "bioinformatics", "ecology",
-    "distance", "classification", "Taxonomicon"
+    "distance", "classification", "Taxonomicon", "Open Tree of Life",
+    "NCBI Taxonomy", "taxonomic distinctness"
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -46,6 +46,7 @@ plot = [
 test = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "jsonschema>=4.0",
     "matplotlib>=3.3.0",
     "seaborn>=0.11.0"
 ]
